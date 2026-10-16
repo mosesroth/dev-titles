@@ -1,0 +1,63 @@
+# Glossary schema (example). Copy this to start a glossary for your own content: seed it
+# from your organization's published localized terminology (the zh / ja versions of your
+# docs or developer portal) so subtitles match what viewers already read. The brand used
+# here ("Acme") is fictional.
+#
+# Retrieval: only terms whose `source` (or an alias) appears in a segment are
+# injected into the translation prompt. `enforce: hard` terms are also checked
+# deterministically (regex) after translation — the model's choice is overridden
+# if it drifts. `enforce: soft` terms are a preference only.
+#
+# `register` / notes guide the LLM; `first_use` pins the chosen rendering so it
+# stays consistent across all segments of a video.
+
+version: 0.1
+languages: [zh-Hans, ja]
+
+terms:
+  - source: "Acme"
+    zh-Hans: "艾克米"              # zh TRANSLATES the brand word "Acme"
+    ja: "Acme"                     # ja KEEPS "Acme" in Latin — key divergence
+    enforce: hard
+    notes: "Per-language brand rule: 艾克米 in zh, Latin 'Acme' in ja. Does NOT apply inside DNT phrases like 'Sign in with Acme'."
+
+  - source: "Acme Appstore"
+    aliases: ["Appstore"]
+    zh-Hans: "艾克米应用商店"
+    ja: "Acmeアプリストア"
+    enforce: hard
+
+  - source: "Orbit TV"
+    zh-Hans: "Orbit TV"           # product name, Latin in both
+    ja: "Orbit TV"
+    enforce: hard
+
+  - source: "Sign in with Acme"
+    zh-Hans: "Sign in with Acme"  # DNT — full English in both locales
+    ja: "Sign in with Acme"
+    enforce: hard
+    notes: "DNT phrase kept fully in Latin even in zh where 'Acme'=艾克米 elsewhere."
+
+  - source: "in-app purchasing"
+    aliases: ["IAP"]
+    zh-Hans: "应用内购买"          # acronym IAP kept in parens: 应用内购买 (IAP)
+    ja: "アプリ内課金"
+    enforce: soft
+
+  - source: "developer console"
+    zh-Hans: "开发者控制台"
+    ja: "開発者コンソール"
+    enforce: soft
+
+  - source: "device"
+    zh-Hans: "设备"
+    ja: "デバイス"
+    enforce: soft
+
+style:
+  ja:
+    register: teineigo        # です・ます; avoid plain form and heavy keigo
+    notes: "Technical/product tone; full-width ？！; apply kinsoku on line breaks."
+  zh-Hans:
+    register: formal-written  # 您 over 你
+    notes: "Single full-width space instead of ，/。 at cue boundaries; ellipsis U+2026."

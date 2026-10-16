@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+.venv/
+
+# Build / test / type caches
+/build
+/doc/_apidoc/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+.cache
+
+# Translation memories (may contain licensed/confidential data) + any raw TMX — never commit
+tm/*.jsonl
+*.tmx
+
+# Source media/captions and generated bundles — don't commit; keep the folders
+# themselves (README / .gitkeep) so the layout is documented.
+input/*
+!input/README.md
+output/*
+!output/.gitkeep
+pilot_out/
+*.local.srt
+*.local.vtt
+
+# Local machine / agent config (per-machine, not shared)
+.claude/settings.local.json
+.mcp.json
+
+# OS / editor
+.DS_Store
+*.DS_Store
+*.swp
+*~
+*#
+
+# operational data (per-machine; may be symlinks)
+/input
+/output
+output/youtube_publish_log.jsonl
