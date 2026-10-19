@@ -1267,3 +1267,158 @@ def test_zh_latin_list_separator_kept_and_no_line_start_comma():
     assert normalize_zh_punct("运行Nimbus OS。Expo也支持") == "运行Nimbus OS Expo也支持"
     for ln in wrap_lines("现在单击Nimbus图标，然后单击“创建Nimbus项目”，接着单击Hello World，再为项目选择一个目录", spec_for("zh-Hans")):
         assert not ln.startswith("，") and not ln.endswith("，")
+
+
+def test_native_editor_accepts_only_guarded_and_judged_rewrites(tmp_path):
+    """Editor rewrites land only if Latin tokens/numbers survive AND the pairwise judge prefers them
+    with the same meaning; the pass is idempotent and logs before/after."""
+    import json
+
+    from dev_titles.editor import native_edit
+    from dev_titles.localize import SentenceRecord
+
+    recs = [
+        SentenceRecord("ja", 0, "If nothing happens, nothing happens.", "何も起きなければ何も起きないだけです", "", []),
+        SentenceRecord("ja", 1, "We ship 3 Acme builds.", "Acmeビルドを3つ出荷します", "", []),
+    ]
+    calls = {"edit": 0}
+
+    def invoke(p):
+        calls["edit"] += 1
+        return json.dumps([
+            {"id": 1, "issue": "literal tautology", "rewrite": "入力がなければ何も起こりません"},
+            {"id": 2, "issue": "x", "rewrite": "ビルドを出荷します"},  # drops Acme + 3 -> guard rejects
+        ])
+
+    judge = lambda p: json.dumps({"same_meaning": True, "better": "B" if "B: 入力" in p else "A", "why": ""})
+    sp = tmp_path / "editor_state.ja.json"
+    changed = native_edit(recs, invoke, "ja", "Japanese", sp, normalize=lambda t, s=None: t,
+                          pair_judge=judge, logger=lambda m: None, seed=1)
+    assert changed == {0} and recs[0].txt == "入力がなければ何も起こりません"
+    assert recs[1].txt == "Acmeビルドを3つ出荷します"
+    n = calls["edit"]
+    assert native_edit(recs, invoke, "ja", "Japanese", sp, normalize=lambda t, s=None: t,
+                       pair_judge=judge, logger=lambda m: None) == set()
+    assert calls["edit"] == n  # idempotent: nothing re-reviewed
+    log = json.loads((tmp_path / "editor_log.ja.json").read_text())
+    assert log[0]["before"] == "何も起きなければ何も起きないだけです"
+
+
+def test_native_editor_rating_veto(tmp_path):
+    """A rewrite the pairwise judge prefers is still rejected if a judge rates it worse than the
+    current line (reference-free); the rejection is logged for the reviewer."""
+    import json
+    import re
+
+    from dev_titles.editor import native_edit
+    from dev_titles.localize import SentenceRecord
+
+    recs = [SentenceRecord("ja", 0, "It's a great promise.", "素晴らしい将来性です", "", [])]
+
+    def rate(p):  # current line OK, suggestion MEANING
+        items = re.findall(r"(\d+)\. EN: .*\n   SUBTITLE: (.*)", p)
+        return json.dumps([{"id": int(n), "level": "MEANING" if "理念" in t else "OK"} for n, t in items])
+
+    def invoke(p):
+        if "SUBTITLE:" in p:
+            return rate(p)
+        return json.dumps([{"id": 1, "issue": "x", "rewrite": "素晴らしい理念です"}])
+
+    judge = lambda p: rate(p) if "SUBTITLE:" in p else json.dumps(
+        {"same_meaning": True, "better": "B" if "B: 素晴らしい理念" in p else "A"})
+    changed = native_edit(recs, invoke, "ja", "Japanese", tmp_path / "editor_state.ja.json",
+                          normalize=lambda t, s=None: t, pair_judge=judge, logger=lambda m: None)
+    assert changed == set() and recs[0].txt == "素晴らしい将来性です"
+    log = json.loads((tmp_path / "editor_log.ja.json").read_text())
+    assert log[0]["status"] == "rejected" and "rated it worse" in log[0]["why"]
+
+
+def test_native_editor_rescues_rewrite_every_judge_rates_better(tmp_path):
+    """A rewrite the pairwise judge rejects (e.g. 'meaning differs') is still applied when every
+    judge rates it better than the current line."""
+    import json
+    import re
+
+    from dev_titles.editor import native_edit
+    from dev_titles.localize import SentenceRecord
+
+    recs = [SentenceRecord("ja", 0, "We had an aha moment.", "アハモーメントがありました", "", [])]
+
+    def rate(p):
+        items = re.findall(r"(\d+)\. EN: .*\n   SUBTITLE: (.*)", p)
+        return json.dumps([{"id": int(n), "level": "OK" if "気づき" in t else "NOTICEABLE"} for n, t in items])
+
+    def invoke(p):
+        if "SUBTITLE:" in p:
+            return rate(p)
+        if '"same_meaning"' in p:
+            return json.dumps({"same_meaning": False, "better": "A"})
+        return json.dumps([{"id": 1, "issue": "calque", "rewrite": "大きな気づきがありました"}])
+
+    changed = native_edit(recs, invoke, "ja", "Japanese", tmp_path / "editor_state.ja.json",
+                          normalize=lambda t, s=None: t, pair_judge=invoke, logger=lambda m: None)
+    assert changed == {0} and recs[0].txt == "大きな気づきがありました"
+    log = json.loads((tmp_path / "editor_log.ja.json").read_text())
+    assert log[0]["status"] == "accepted" and "rescued" in log[0]["why"]
+
+
+def test_editor_quote_fix_and_zh_list_separators():
+    from dev_titles.editor import fix_unbalanced_quotes
+    from dev_titles.localize import zh_list_separators
+
+    assert fix_unbalanced_quotes("保留异议，全力执行”，我们就经常这么做") == "保留异议，全力执行，我们就经常这么做"
+    assert fix_unbalanced_quotes("“保留异议”，全力执行") == "“保留异议”，全力执行"
+    src = "You can learn from the JavaScript world, TypeScript world, ReScript, Java, Kotlin, iOS, C++."
+    assert zh_list_separators("从JavaScript TypeScript ReScript Java Kotlin iOS和C++的世界学习", src) == (
+        "从JavaScript、TypeScript、ReScript、Java、Kotlin、iOS和C++的世界学习"
+    )
+    assert zh_list_separators("使用React Native开发", "We use React Native, Expo, and Hermes.") == "使用React Native开发"
+
+
+def test_video_brief_uses_description_and_whole_transcript(tmp_path):
+    from dev_titles.editor import video_brief, video_description
+
+    (tmp_path / "description.txt").write_text("Jane Roe, Senior Developer Advocate at Acme, interviews Bo.")
+    assert video_description(tmp_path).startswith("Jane Roe")
+    prompts = []
+
+    def inv(p):
+        prompts.append(p)
+        return "brief"
+
+    text = "word " * 6000  # 30k chars -> chunked notes, then the brief
+    b = video_brief(text, inv, tmp_path / "video_brief.txt", description=video_description(tmp_path))
+    assert b == "brief" and len(prompts) == 4  # 3 chunk notes + 1 brief
+    assert "Senior Developer Advocate" in prompts[-1]
+    n = len(prompts)
+    assert video_brief(text, inv, tmp_path / "video_brief.txt", description=video_description(tmp_path)) == "brief"
+    assert len(prompts) == n  # cached
+    assert video_description(tmp_path / "missing") == ""
+
+
+def test_qe_repair_protects_editor_rewrites_and_runs_accept_check():
+    """A native-editor rewrite is only repaired when BOTH judges flag a major; and any repair must
+    pass accept_check (blocks literal-sense 'fixes' like 可能性 -> 約束)."""
+    from dev_titles.localize import SentenceRecord
+    from dev_titles.translation_qe import qe_repair
+
+    recs = [
+        SentenceRecord("ja", 0, "Pick the lowest common denominator.", "最も性能の低いデバイスに合わせる", "", []),
+        SentenceRecord("ja", 1, "It's a great promise.", "素晴らしい可能性です", "", []),
+    ]
+    per_seg = {
+        0: {"claude": {"critical": 0, "major": 1, "minor": 0}, "codex": {"critical": 0, "major": 0, "minor": 0}},
+        1: {"claude": {"critical": 0, "major": 1, "minor": 0}, "codex": {"critical": 0, "major": 1, "minor": 0}},
+    }
+    sus = [{"kind": "mqm-major", "i": 0, "detail": "narrowed"}, {"kind": "mqm-major", "i": 1, "detail": "promise"}]
+    tried = []
+
+    def retrans(rec, crit):
+        tried.append(rec.i)
+        return {0: "共通の最低基準に合わせる", 1: "素晴らしい約束です"}[rec.i]
+
+    fixed = qe_repair(recs, "ja", judges=[("claude", lambda p: "[]")], lang_name="Japanese", retranslate=retrans,
+                      per_seg=per_seg, judge_suspects=sus, protected={0},
+                      accept_check=lambda rec, old, new: False)
+    assert 0 not in tried  # protected: only one judge flagged it
+    assert fixed == [] and recs[1].txt == "素晴らしい可能性です"  # accept_check rejected the literal sense

@@ -175,5 +175,13 @@ def build_review_bundle(out_dir: str | Path, en: Subtitle, outputs: list[LangOut
     for o in outputs:
         _w(f"{o.language}.vtt", write_vtt(o.subtitle))
         _w(f"{o.language}.srt", write_srt(o.subtitle))
-    _w("REVIEW.md", render_review_markdown(en, outputs))
+    md = render_review_markdown(en, outputs)
+    from .editor import review_section
+
+    extra = "".join(
+        f"\n### {o.language} — native-editor suggestions\n{sec}"
+        for o in outputs
+        if (sec := review_section(out, o.language))
+    )
+    _w("REVIEW.md", md + extra)
     return written

@@ -18,6 +18,7 @@ import contextlib
 import copy
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -103,8 +104,37 @@ def _normalizer(lang: str, conversational: bool = False):
     because 您们 is unnatural. Applies to both registers — docs-formal already wanted 您."""
     base = normalize_ja_punct if lang == "ja" else normalize_zh_punct
     if lang == "zh-Hans":
-        return lambda t, src=None: restore_question_mark(src, _zh_polite_you(base(t)), lang)
+        return lambda t, src=None: restore_question_mark(
+            src, zh_list_separators(_zh_polite_you(base(t)), src), lang
+        )
     return lambda t, src=None: restore_question_mark(src, base(t), lang)
+
+
+_EN_NAME_TOKEN = r"(?:[A-Z][A-Za-z0-9.+#-]*|[a-z]+[A-Z][A-Za-z0-9.+#-]*|[A-Z0-9][A-Za-z0-9]*\+\+)"
+_EN_NAME_RUN = re.compile(rf"{_EN_NAME_TOKEN}(?: {_EN_NAME_TOKEN})*")
+
+
+def zh_list_separators(txt: str, src: str | None) -> str:
+    """zh: an English LIST of Latin names ("JavaScript, TypeScript, ReScript, Java…") that the
+    target ran together with spaces or nothing ('JavaScriptTypeScriptReScript') gets 、 between the
+    items — a run-on list read as one name and was flagged by native reviewers. Only items that
+    appear in the English list, only when >=3 of them sit adjacent with nothing but spaces between."""
+    if not src or not txt or src.count(",") < 2:
+        return txt
+    items = []
+    for part in re.split(r",\s*|\s+(?:and|or)\s+", src):
+        items += [m.group(0) for m in _EN_NAME_RUN.finditer(part) if len(m.group(0)) >= 2]
+    items = sorted(set(items), key=len, reverse=True)
+    if len(items) < 3:
+        return txt
+    alt = "|".join(re.escape(x) for x in items)
+    run = re.compile(rf"(?:{alt})(?:\s*(?:{alt})){{2,}}")
+
+    def fix(m):
+        parts = re.findall(alt, m.group(0))
+        return "、".join(parts) if "".join(parts).replace(" ", "") == m.group(0).replace(" ", "") else m.group(0)
+
+    return run.sub(fix, txt)
 
 
 # Question-final forms: a ja/zh rendering of an English question that ends in one of these but has
@@ -209,6 +239,14 @@ def edit_fix(invoke, src: str, cur: str, miss: str, tgt_lang_name: str) -> str:
         f"MISSING CONTENT to add: {_miss}"
     ).strip()
     return _unmask(out, mask)
+
+
+def _with_brief(transcript: str, video_vocab: dict | None) -> str:
+    """Prefix the full-transcript context with the per-video brief (speakers, roles, topic,
+    context-dependent jargon) so a line like "we don't have product" is read as the tech-industry
+    'product (management) team', not 'no product'. The brief is runtime-only (video_vocab['brief'])."""
+    brief = (video_vocab or {}).get("brief", "")
+    return f"VIDEO BRIEF: {brief}\n\nTRANSCRIPT: {transcript}" if brief else transcript
 
 
 def keep_latin_terms(glossary, video_vocab, lang: str = "") -> list[str]:
@@ -462,7 +500,7 @@ def translate_subtitle(
         cf = p.open("a", encoding="utf-8")
 
     sents = merge_en_to_sentences(en)
-    ctx = " ".join(s.text for s in sents)
+    ctx = _with_brief(" ".join(s.text for s in sents), video_vocab)
     logger(f"{lang}: {len(en.cues)} EN cues -> {len(sents)} sentences")
     cues: list = []
     issues: list[EnforcementIssue] = []
@@ -731,7 +769,7 @@ def _lang_setup(
         t.translations.get(lang) for t in g.terms if t.translations.get(lang)
     ] + extra_dnt
     sents = merge_en_to_sentences(en)
-    ctx = " ".join(s.text for s in sents)
+    ctx = _with_brief(" ".join(s.text for s in sents), video_vocab)
     return spec, g, extra_dnt, keep_together, sents, ctx
 
 
@@ -950,6 +988,7 @@ def _localize_en_impl(
     conversational: bool = False,
     cache_path: str | Path | None = None,
     condense: bool = True,
+    native_editor: bool = True,
     logger=_noop,
 ) -> list[LangOutput]:
     """Localize an EN subtitle into each target language. Returns LangOutputs ready
@@ -965,6 +1004,16 @@ def _localize_en_impl(
 
     qe_invoke = invoke or getattr(translator, "_invoke", None)
     outputs: list[LangOutput] = []
+    if qe_invoke is not None and native_editor:
+        from .editor import video_brief, video_description
+
+        _od = Path(cache_path).parent if cache_path else None
+        _bp = (_od / "video_brief.txt") if _od else None
+        _desc = video_description(_od)
+        _brief = video_brief(" ".join(c.text for c in en.cues), qe_invoke, _bp, description=_desc)
+        if _brief:
+            video_vocab = {**(video_vocab or {}), "brief": _brief}
+            logger(f"video brief: {_brief[:160]}…")
     for lang in langs:
         bank = (
             exemplar_bank_for(lang)
@@ -1004,8 +1053,15 @@ def _localize_en_impl(
             # above 8.5 cps (p90 ~10.2), and squeezing near-limit lines to the exact budget is what
             # produced broken grammar / dropped greetings on a tutorial test.
             _trig_cps = float(os.environ.get("SUBTITLE_CONDENSE_TRIGGER_CPS", "10.0"))
+            # LONG LISTS ("JavaScript, TypeScript, ReScript, Java, Kotlin…") are hard to read even
+            # just over the limit — native graders flagged them — so a list sentence (>=3 commas)
+            # triggers at the target budget itself, not the looser 10 cps.
             _triggers = {
-                i: max(int(_trig_cps * max(s.end - s.start, _spec.min_dur)), 6)
+                i: (
+                    _budgets[i]
+                    if s.text.count(",") >= 3
+                    else max(int(_trig_cps * max(s.end - s.start, _spec.min_dur)), 6)
+                )
                 for i, s in enumerate(_sents)
             }
             _chg = condense_lang(
@@ -1023,6 +1079,38 @@ def _localize_en_impl(
             if _chg:
                 _rewrite_cache(cache_path, lang, records)
                 logger(f"{lang}: condensed {len(_chg)} line(s)")
+        # NATIVE-EDITOR pass (ON by default; --no-editor): a native subtitle editor flags only lines a
+        # native viewer would notice (literal idioms, odd terms, run-on lists, stiff register,
+        # context misreads) and proposes minimal rewrites; accepted only past the token/number
+        # guards AND a pairwise same-meaning-and-better check by the second-family judge. Runs
+        # before QE so the panel scores what ships. See dev_titles/editor.py.
+        if native_editor and qe_invoke is not None and records:
+            from .editor import native_edit
+
+            _esp = (Path(cache_path).parent / f"editor_state.{lang}.json") if cache_path else None
+            _st = (getattr(glossary, "style", {}) or {}).get(lang, {}) or {}
+            _reg = _st.get("register_conversational" if conversational else "register", "")
+            _terms = [
+                t.translations.get(lang, "")
+                for t in effective_glossary(glossary, video_vocab, conversational, lang=lang)[0].terms
+                if t.enforce == "hard" and t.source.lower() in " ".join(r.src for r in records).lower()
+            ]
+            _ech = native_edit(
+                records,
+                qe_invoke,
+                lang,
+                _LANG_NAME.get(lang, lang),
+                _esp,
+                normalize=_normalizer(lang, conversational),
+                pair_judge=qe_second_judge,
+                brief=(video_vocab or {}).get("brief", ""),
+                register=str(_reg)[:300],
+                glossary_terms=_terms,
+                logger=logger,
+            )
+            if _ech:
+                _rewrite_cache(cache_path, lang, records)
+                logger(f"{lang}: native editor rewrote {len(_ech)} line(s)")
         # AUTOMATIC INCREMENTAL RE-REVIEW: if a prior QE state exists for this out dir (a
         # previous --qe-judge run), re-judge ONLY the segments whose translation changed since
         # then and reuse the stored panel for the rest — a cheap, correct refresh of the full
@@ -1128,6 +1216,20 @@ def _localize_en_impl(
                 f"line(s) restored"
                 + (f" -> DQF {dqf['score']} {'PASS' if dqf['pass'] else 'FAIL'}" if dqf else "")
             )
+        # Native-editor rewrites are PROTECTED from the error-judge repair loop, and every repair must
+        # also win a native-viewer pairwise check (accuracy first, then naturalness).
+        from .editor import editor_rewritten, repair_check
+
+        _editor_protected = (
+            editor_rewritten(Path(cache_path).parent / f"editor_state.{lang}.json", records)
+            if (cache_path and native_editor)
+            else set()
+        )
+        _accept_check = (
+            repair_check(qe_invoke, _LANG_NAME.get(lang, lang), records)
+            if (native_editor and qe_invoke is not None)
+            else None
+        )
         # QE-guided auto-repair (Layer B): re-translate judge-flagged majors + deterministic
         # garbles with the critique as a constraint; accept only if the re-judge improves.
         if qe_repair and dqf is not None and (_prior is None or _has_major):
@@ -1185,6 +1287,8 @@ def _localize_en_impl(
                 extra_critiques=extra_crit,
                 cmp_samples=3,
                 logger=logger,
+                protected=_editor_protected,
+                accept_check=_accept_check,
             )
             if fixed:
                 _rewrite_cache(cache_path, lang, records)

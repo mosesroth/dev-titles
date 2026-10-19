@@ -334,6 +334,7 @@ def cmd_localize(args) -> int:
         f"Localizing {args.input} -> {', '.join(langs)} (glossary={args.glossary}"
         f"{', vocab=' + args.vocab if args.vocab else ''})…"
     )
+    _save_description_file(args)
     outputs = localize_en(
         en,
         CliTranslator(),
@@ -349,6 +350,7 @@ def cmd_localize(args) -> int:
         conversational=_conversational(args, video_vocab),
         cache_path=cache,
         condense=not getattr(args, "no_condense", False),
+        native_editor=not getattr(args, "no_editor", False),
         logger=lambda _m: print(_m, flush=True),
     )
     _persist_term_pins(outputs, out)
@@ -558,6 +560,14 @@ def cmd_rescore(args) -> int:
     return 0
 
 
+def _save_description_file(args):
+    """--description-file: copy the supplied description into <out>/description.txt for the brief."""
+    f = getattr(args, "description_file", None)
+    if f and getattr(args, "out", None):
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "description.txt").write_text(Path(f).read_text(encoding="utf-8"), encoding="utf-8")
+
+
 def _qe_second_judge(args):
     """The different-family second judge for the two-judge QE panel: Codex CLI
     (GPT-5.x). Only when --qe-judge and the codex binary is present; else None
@@ -754,6 +764,10 @@ def cmd_run(args) -> int:
         )
 
         meta_names = harvest_names("", ri.metadata)
+        if ri.metadata and getattr(args, "out", None):
+            # keep the written description for the per-video brief (names/roles are authoritative there)
+            Path(args.out).mkdir(parents=True, exist_ok=True)
+            (Path(args.out) / "description.txt").write_text(ri.metadata, encoding="utf-8")
         # Channel NAME REGISTRY (glossary/names.yaml): canonical host/guest spellings so a
         # mangled surname is corrected to the KNOWN spelling, not a per-run guess (the
         # per-video metadata harvest is transient/unreliable). Match against this video's
@@ -954,6 +968,7 @@ def cmd_run(args) -> int:
     bank_for = _exemplar_bank_for(args, langs)
     en = _en_review(en, out, ri.title or ri.path)
     print(f"Localizing -> {', '.join(langs)}…")
+    _save_description_file(args)
     outputs = localize_en(
         en,
         CliTranslator(),
@@ -969,6 +984,7 @@ def cmd_run(args) -> int:
         conversational=_conversational(args, video_vocab),
         cache_path=str(out / "cache.jsonl"),
         condense=not getattr(args, "no_condense", False),
+        native_editor=not getattr(args, "no_editor", False),
         logger=lambda _m: print(_m, flush=True),
     )
     _persist_term_pins(outputs, out)
@@ -1192,6 +1208,17 @@ def main(argv=None) -> int:
         help="ja: skip the condensation pass (on by default: tightens translations like a subtitle "
         "editor before QE, guarded; ~12%% shorter)",
     )
+    rn.add_argument(
+        "--no-editor",
+        action="store_true",
+        help="skip the native-editor pass (on by default: a native subtitle editor flags lines a "
+        "viewer would notice and rewrites them; accepted only if a second judge agrees)",
+    )
+    rn.add_argument(
+        "--description-file",
+        help="video description text (names, roles, topic) for the per-video brief — for videos "
+        "not on YouTube yet; published videos fetch it automatically",
+    )
     rn.add_argument("--model-size", default="large-v3", dest="model_size")
     rn.add_argument("--device", default="cpu", help="cpu | cuda")
     rn.set_defaults(func=cmd_run)
@@ -1265,6 +1292,17 @@ def main(argv=None) -> int:
         action="store_true",
         help="ja: skip the condensation pass (on by default: tightens translations like a subtitle "
         "editor before QE, guarded; ~12%% shorter)",
+    )
+    lo.add_argument(
+        "--no-editor",
+        action="store_true",
+        help="skip the native-editor pass (on by default: a native subtitle editor flags lines a "
+        "viewer would notice and rewrites them; accepted only if a second judge agrees)",
+    )
+    lo.add_argument(
+        "--description-file",
+        help="video description text (names, roles, topic) for the per-video brief — for videos "
+        "not on YouTube yet; published videos fetch it automatically",
     )
     lo.add_argument("--no-cache", action="store_true", help="don't write a resumable cache")
     lo.set_defaults(func=cmd_localize)

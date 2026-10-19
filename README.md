@@ -22,7 +22,9 @@ layout rules, validation and the guards that keep the LLM honest.
    slips. It keeps technical meaning, numbers and identifiers. Builds an English master
    (42 characters per line, about 17 characters per second, at most 2 lines).
 3. **Translate EN to zh-Hans / ja** one whole sentence at a time, with the full transcript
-   as context:
+   and a **video brief** as context. The brief names the speakers, their roles, the topic and
+   any context-dependent jargon. It is built from the video description (saved at ingest,
+   fetched with `yt-dlp`, or supplied with `--description-file`) plus the whole transcript:
    - a **glossary**: hard/soft terms, do-not-translate (DNT) masking, avoid-forms, and
      sense-specific renderings,
    - **register**: Japanese polite form (です・ます); formal written Chinese (您), or
@@ -43,12 +45,23 @@ layout rules, validation and the guards that keep the LLM honest.
 6. **Japanese condensation.** Japanese has a much lower reading-speed budget than English.
    Over-long Japanese lines are tightened the way a subtitle editor would. The pass is
    guarded and can be turned off with `--no-condense`.
-7. **Validation.** Every cue is checked against the language's rules (duration, gaps,
+7. **Native-editor pass.** A reference-free native subtitle editor flags lines a native viewer
+   would notice: literal idioms, odd terms, wrong register, run-ons, context misreads. It
+   proposes a minimal rewrite for each. A rewrite lands only if:
+   - every Latin token and number survives, and it is not much longer;
+   - the second judge (pairwise, randomized order) says it keeps the meaning and reads better;
+   - neither judge, rating the current and the suggested line side by side, rates it worse.
+
+   A suggestion the pairwise judge rejected is still applied if *every* judge rates it better.
+   Measured against human-reviewed subtitles, that rescue was almost never wrong. QE repair
+   later can't overwrite an editor rewrite unless both judges flag it as a major error.
+   Turn the pass off with `--no-editor`.
+8. **Validation.** Every cue is checked against the language's rules (duration, gaps,
    lines, cps, cpl, punctuation). Errors block; warnings are flagged.
-8. **Review bundle.** You get the EN master, a VTT and an SRT for each language, and
+9. **Review bundle.** You get the EN master, a VTT and an SRT for each language, and
    `REVIEW.md`, which lists validation results, glossary enforcement, QE findings, coverage
    residuals and suspect cues.
-9. **Optional YouTube publishing.** Replaces or adds caption tracks through the YouTube
+10. **Optional YouTube publishing.** Replaces or adds caption tracks through the YouTube
    Data API (see [docs/YOUTUBE-API-SETUP.md](docs/YOUTUBE-API-SETUP.md)).
 
 Runs are **resumable**: per-sentence results are cached in `cache.jsonl` inside the output
@@ -105,6 +118,21 @@ dev-titles audit      ours.en.srt human.en.srt --out audit.xlsx   # compare to a
 dev-titles tm stats                                   # translation memory: seed/add/export/stats/import-tmx
 dev-titles promote-terms --dry-run                    # promote recurring term pins to the glossary
 ```
+
+### Learning from human reviews
+
+Once reviewers have corrected some of your subtitles, these scripts use their corrections:
+
+- `scripts/mine_review.py` mines before/after pairs (machine draft vs reviewer's final) and
+  keeps the generalizable ones as few-shot examples for the native editor
+  (`glossary/editor_examples.<lang>.jsonl`). It also writes a report of recurring
+  substitutions, which are candidate glossary rules.
+- `scripts/benchmark.py` grades two runs (OLD/NEW) against the human subtitles, pairing each
+  sentence across runs, as OK / NOTICEABLE / MEANING.
+- `scripts/gate_benchmark.py`, `gate_compare.py` and `gate_rescue.py` measure the editor's
+  acceptance gates against human reviews. Each suggestion is graded before and after by two
+  graders from different model families, and the candidate gates are replayed. The current
+  gate was chosen this way.
 
 For multi-hour jobs launched from an agent session, use `scripts/run_detached.py`. It
 detaches the job into its own session so the job outlives the agent's turn.

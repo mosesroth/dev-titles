@@ -327,6 +327,8 @@ def qe_repair(
     extra_flags=None,
     extra_critiques=None,
     cmp_samples=1,
+    protected=None,
+    accept_check=None,
 ):
     """QE-guided auto-repair (Layer B). For each segment a judge flagged major/critical
     (plus any deterministic `extra_flags` indices — dropped-token / latin-typo garbles),
@@ -343,7 +345,15 @@ def qe_repair(
 
     `retranslate(rec, critique) -> str` is supplied by the caller (it re-runs the full
     translate+enforce+completeness gates). Mutates `records[i].txt` in place on accept;
-    returns the list of repaired indices."""
+    returns the list of repaired indices.
+
+    `protected`: indices the native-editor pass rewrote. The error judges reward word-for-word
+    fidelity, so left alone they "repair" a natural rewrite back into a literal one (VVD-style:
+    'lowest common denominator' -> 最も性能の低いデバイス was undone to 共通の最低基準). A protected line
+    is only repaired when BOTH judges flag a major/critical. `accept_check(rec, old, new) -> bool`:
+    a native-viewer pairwise check every accepted repair must also pass (accuracy first, then
+    naturalness) — it blocks repairs that swap a correct sense for a literal one
+    ('a great promise' 可能性 -> 約束)."""
     compare_judges = compare_judges or judges
     log = logger or (lambda _m: None)
     if not judges or not records:
@@ -369,6 +379,16 @@ def qe_repair(
     }
     targets |= set(extra_flags or [])
     targets |= set(extra_critiques)  # term-consistency cues (canonical-rendering fix)
+    if protected:
+        def _both_major(i):
+            seg = per_seg.get(i, {})
+            vals = [v for v in seg.values() if isinstance(v, dict)]
+            return len(vals) >= 2 and all(v.get("major", 0) + v.get("critical", 0) > 0 for v in vals)
+
+        held = {i for i in targets & set(protected) if not _both_major(i)}
+        if held:
+            log(f"{lang}: QE-repair — {len(held)} native-editor rewrite(s) protected (not corroborated)")
+        targets -= held
     order = sorted(targets, key=lambda i: -_seg_penalty(per_seg.get(i, {})))[:max_repairs]
     repaired = []
     for i in order:
@@ -393,6 +413,9 @@ def qe_repair(
             # SPECIFIC flagged error is resolved — accept even if the holistic panel score TIES
             # (the judge may flag the segment for unrelated fragment reasons, which the penalty
             # gate can't distinguish — that's why cue-93 conflicts->競合 stuck at 2.5->2.5).
+            if accept_check is not None and not accept_check(rec, rec.txt, new_txt):
+                log(f"{lang}: QE-repair #{i} reject (native check: not better as a subtitle)")
+                continue
             if _targeted_fix_ok(critique, rec.txt, new_txt):
                 log(
                     f"{lang}: QE-repair #{i} ACCEPT (targeted: quoted wrong->right term): {critique[:60]}"
