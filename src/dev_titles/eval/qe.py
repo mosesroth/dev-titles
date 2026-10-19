@@ -40,7 +40,8 @@ class QeScorer(ABC):
 
 # ---- COMETKiwi -----------------------------------------------------------------
 class CometKiwiScorer(QeScorer):
-    """Wraps Unbabel/wmt22-cometkiwi-da. `pip install 'dev-titles[qe]'`."""
+    """Wraps Unbabel/wmt22-cometkiwi-da. `pip install 'dev-titles[qe]'`. The model is gated on
+    Hugging Face: accept its license on the model page, then `hf auth login` once."""
 
     def __init__(
         self, model: str = "Unbabel/wmt22-cometkiwi-da", *, batch_size: int = 16, gpus: int = 0

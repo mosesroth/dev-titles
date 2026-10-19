@@ -70,9 +70,13 @@ def llm_serialize_lock(logger=_noop):
     segments. A second job WAITS for the first instead of
     competing. Best-effort: if flock is unavailable, runs unguarded. Ad-hoc LLM scripts should
     acquire this too (`with llm_serialize_lock(print): ...`)."""
-    import fcntl
     import os
 
+    try:
+        import fcntl
+    except ImportError:  # Windows: no flock -> run unguarded
+        yield
+        return
     path = os.path.expanduser("~/.dev_titles_llm.lock")
     fh = None
     try:

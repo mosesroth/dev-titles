@@ -75,17 +75,36 @@ directory.
 Requires Python 3.10+ and `ffmpeg` on `PATH` for media input.
 
 ```bash
-git clone <this repo> dev-titles && cd dev-titles
-pip install -e '.[cjk]'            # core + word-safe CJK line breaking
+git clone https://github.com/mosesroth/dev-titles && cd dev-titles
+pip install -e '.[cjk]'                   # core + word-safe CJK line breaking
 pip install -e '.[cjk,parakeet,whisper]'  # Apple Silicon: Parakeet ASR + WhisperX drop recovery
 pip install -e '.[cjk,whisper]'           # any platform: WhisperX ASR (~4 GB of models on first run)
 pip install -e '.[cjk,assemblyai]'        # cloud ASR instead: AssemblyAI ($ASSEMBLYAI_API_KEY)
-pip install -e '.[youtube]'        # + YouTube URL input / caption publishing
-pip install -e '.[dev]'            # tests and linters
+pip install -e '.[youtube]'               # + YouTube URL input (yt-dlp) and caption publishing
+pip install -e '.[dev]'                   # tests and linters
 ```
 
-Other extras: `api` (Anthropic SDK), `bedrock` (Claude on AWS Bedrock), `aws` (boto3),
-`search` (DuckDuckGo doc-grounding).
+Other extras: `api` (Anthropic SDK), `bedrock` (Claude, and the optional GPT judge, on AWS
+Bedrock), `aws` (boto3), `xlsx` (.xlsx term-base import and the `audit` report), `qe`
+(CometKiwi neural QE), `search` (DuckDuckGo doc-grounding).
+
+### What you need to sign in to
+
+You need at least one model backend. Everything else is optional.
+
+| For | Install | Sign in / configure |
+|---|---|---|
+| **Translation and judging (required, pick one)** | [Claude Code](https://code.claude.com) (default), or the [Codex CLI](https://github.com/openai/codex), or nothing for an OpenAI-compatible API | Claude Code: `claude` once to sign in (Claude subscription, `ANTHROPIC_API_KEY`, or Bedrock/Vertex). Codex: `codex login` (ChatGPT account or API key). API: `$OPENAI_API_KEY` / `$OPENAI_BASE_URL`. See [LLM backends](#llm-backends) |
+| Second judge (recommended) | the *other* CLI: Codex if your primary is Claude, Claude Code if it's GPT | its own sign-in, as above |
+| Local speech recognition | `parakeet` / `whisper` extras, `ffmpeg` | nothing (models download from Hugging Face on first run, no account) |
+| AssemblyAI (optional cloud ASR) | `assemblyai` extra | `$ASSEMBLYAI_API_KEY` from your AssemblyAI account (free plan available) |
+| YouTube URL input | `youtube` extra | nothing for public videos |
+| YouTube caption publishing | `youtube` extra | a Google Cloud OAuth client and a one-time sign-in by the channel owner: [docs/YOUTUBE-API-SETUP.md](docs/YOUTUBE-API-SETUP.md) |
+| CometKiwi QE (optional) | `qe` extra | the model is gated: accept its license on Hugging Face, then `hf auth login` (older: `huggingface-cli login`) |
+| Claude or GPT on AWS Bedrock (optional) | `bedrock` extra | standard AWS credentials; the GPT judge uses `$BEDROCK_API_KEY` / `$AWS_BEARER_TOKEN_BEDROCK` |
+
+Windows: the pipeline runs, but Parakeet is macOS-only and the shared job lock is skipped,
+so avoid running two translation jobs at once.
 
 ## Quick start
 

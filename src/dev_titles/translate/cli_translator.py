@@ -5,8 +5,15 @@ Bedrock (CLAUDE_CODE_USE_BEDROCK=1, AWS_REGION=...), it needs no API key and
 inherits your AWS credentials. This is the path to use when direct Anthropic-API / Bedrock-SDK creds
 aren't available but the CLI is.
 
-Invocation: `claude -p --output-format text --bare [--model <id>]` with the prompt
-on **stdin** (never as an arg). Omitting `--model` uses the CLI's configured
+Invocation: `claude -p --output-format text <isolation> [--model <id>]` with the prompt
+on **stdin** (never as an arg). The isolation flags keep the user's hooks, MCP servers,
+plugins and CLAUDE.md out of every call, and depend on how Claude Code is signed in:
+  - API key or a cloud provider in the environment (ANTHROPIC_API_KEY,
+    CLAUDE_CODE_USE_BEDROCK / _VERTEX / _FOUNDRY): `--bare` (fastest);
+  - otherwise, e.g. a Claude Pro/Max subscription login: `--safe-mode`. Bare mode never reads
+    the subscription (OAuth) login, so it would fail there. Safe mode keeps normal sign-in.
+  Older CLIs without --safe-mode fall back to plain `-p`. Override with
+  $DEV_TITLES_CLAUDE_MODE=bare|safe|plain. Omitting `--model` uses the CLI's configured
 default model, which auto-upgrades as new models ship (matches the "use the
 default model" preference); pass `model_id=` to pin.
 
@@ -18,6 +25,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 
 
@@ -29,10 +37,23 @@ def _resolve_binary() -> str:
 
 DEFAULT_BINARY = _resolve_binary()
 
+_KEY_OR_CLOUD = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
+
+
+def isolation_mode(env=None) -> str:
+    """bare | safe | plain — see the module docstring."""
+    e = os.environ if env is None else env
+    forced = (e.get("DEV_TITLES_CLAUDE_MODE") or "").strip().lower()
+    if forced in ("bare", "safe", "plain"):
+        return forced
+    return "bare" if any(e.get(k) for k in _KEY_OR_CLOUD) else "safe"
+
 
 def _default_runner(argv: list[str], prompt: str, timeout: float, env) -> str:
+    # run from a neutral directory so a project's .claude/ or .mcp.json is never picked up
     proc = subprocess.run(
-        argv, input=prompt, capture_output=True, text=True, timeout=timeout, env=env
+        argv, input=prompt, capture_output=True, text=True, timeout=timeout, env=env,
+        cwd=tempfile.gettempdir(),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"claude CLI exited {proc.returncode}: {proc.stderr.strip()[:500]}")
@@ -63,9 +84,14 @@ class CliTranslator(Translator):
         # 5 retries with exponential backoff rides out a sustained-throttle window (a load
         # spike degrades to slower, not untranslated — learned from a concurrency incident on a long run).
         self.retries = retries
+        self.mode = isolation_mode(env)
 
     def _argv(self) -> list[str]:
-        argv = [self.binary, "-p", "--output-format", "text", "--bare"]
+        argv = [self.binary, "-p", "--output-format", "text"]
+        if self.mode == "bare":
+            argv.append("--bare")
+        elif self.mode == "safe":
+            argv += ["--safe-mode", "--no-session-persistence", "--tools", ""]
         if self.model_id:
             argv += ["--model", self.model_id]
         return argv
@@ -88,6 +114,9 @@ class CliTranslator(Translator):
                 return self._runner(self._argv(), prompt, self.timeout, self.env).strip()
             except (subprocess.TimeoutExpired, RuntimeError) as e:
                 last = e
+                if self.mode == "safe" and "unknown option" in str(e).lower():
+                    self.mode = "plain"  # older Claude Code without --safe-mode
+                    continue
                 if attempt < self.retries:
                     base = 8.0 if self._is_throttle(e) else 2.0
                     delay = min(base * (2**attempt), 90.0) + random.uniform(0, base)

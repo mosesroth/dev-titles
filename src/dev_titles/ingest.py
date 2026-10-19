@@ -58,7 +58,7 @@ def _resolve_youtube(url: str, workdir: Path) -> ResolvedInput:
         import yt_dlp
     except ImportError as e:
         raise RuntimeError(
-            "yt-dlp is required to ingest a YouTube URL " "(`pip install yt-dlp`)."
+            "yt-dlp is required to ingest a YouTube URL: pip install 'dev-titles[youtube]'"
         ) from e
     workdir.mkdir(parents=True, exist_ok=True)
     opts = {

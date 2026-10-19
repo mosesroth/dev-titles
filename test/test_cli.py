@@ -83,16 +83,36 @@ def test_cli_translator_argv_and_stdin():
         return "  提交您的应用  \n"
 
     # No model_id -> --model omitted (CLI default, auto-upgrades).
-    tr = CliTranslator(binary="/bin/claude", runner=fake_runner)
+    tr = CliTranslator(binary="/bin/claude", runner=fake_runner, env={"ANTHROPIC_API_KEY": "k"})
     out = tr.translate(TranslationRequest("Submit your app", "en", "zh-Hans"))
     assert out == "提交您的应用"  # stripped
-    assert seen["argv"] == ["/bin/claude", "-p", "--output-format", "text", "--bare"]
+    assert seen["argv"] == ["/bin/claude", "-p", "--output-format", "text", "--bare"]  # API key -> bare
     assert "--model" not in seen["argv"]
     assert "<TRANSLATE_THIS>" in seen["prompt"]  # prompt goes on stdin
 
-    tr2 = CliTranslator(binary="/bin/claude", model_id="claude-opus-5", runner=fake_runner)
+    tr2 = CliTranslator(binary="/bin/claude", model_id="claude-opus-5", runner=fake_runner, env={})
     tr2.translate(TranslationRequest("x", "en", "ja"))
     assert seen["argv"][-2:] == ["--model", "claude-opus-5"]
+    # subscription login (no key / cloud provider): bare mode can't read it -> safe mode
+    assert "--safe-mode" in seen["argv"] and "--bare" not in seen["argv"]
+
+
+def test_cli_translator_falls_back_when_safe_mode_unknown():
+    from dev_titles.translate import CliTranslator
+
+    calls = []
+
+    def runner(argv, prompt, timeout, env):
+        calls.append(list(argv))
+        if "--safe-mode" in argv:
+            raise RuntimeError("claude CLI exited 1: error: unknown option '--safe-mode'")
+        return "ok"
+
+    tr = CliTranslator(binary="/bin/claude", runner=runner, env={})
+    assert tr._invoke("x") == "ok" and tr.mode == "plain"
+    assert calls[-1] == ["/bin/claude", "-p", "--output-format", "text"]
+    assert CliTranslator(env={"DEV_TITLES_CLAUDE_MODE": "bare"}).mode == "bare"
+    assert CliTranslator(env={"CLAUDE_CODE_USE_BEDROCK": "1"}).mode == "bare"
 
 
 def test_detect_cli_commands():

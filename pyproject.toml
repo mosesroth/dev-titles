@@ -27,9 +27,11 @@ whisper = ["whisperx>=3.1"]                          # local ASR (needs ffmpeg o
 parakeet = ["parakeet-mlx"]                          # fast local ASR (Apple Silicon / MLX only)
 assemblyai = ["requests>=2.31"]                      # AssemblyAI cloud ASR ($ASSEMBLYAI_API_KEY)
 api = ["anthropic>=0.40"]                            # Claude via the first-party Anthropic API
-bedrock = ["anthropic[bedrock]>=0.40"]               # Claude on AWS Bedrock (optional)
+bedrock = ["anthropic[bedrock]>=1.2", "openai>=1.0"]  # Claude (+ GPT judge) on AWS Bedrock (optional)
 aws = ["boto3>=1.34"]
-youtube = ["google-api-python-client>=2.0", "google-auth-oauthlib>=1.0"]
+youtube = ["yt-dlp", "google-api-python-client>=2.0", "google-auth-oauthlib>=1.0"]  # URL input + caption publishing
+xlsx = ["openpyxl>=3.1"]                             # .xlsx term-base import + audit report
+qe = ["unbabel-comet>=2.2"]                          # optional CometKiwi QE (gated HF model: accept license + hf auth login)
 search = ["ddgs>=6.0"]  # DuckDuckGo fallback for auto doc-grounding (Google CSE needs no dep)
 dev = ["pytest>=8.0", "pytest-cov", "black", "isort", "flake8", "mypy"]
 

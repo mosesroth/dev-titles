@@ -22,7 +22,10 @@ _FORBIDDEN = 2
 
 def import_termbase(xlsx_path: str | Path) -> list[dict]:
     """Parse the term-base workbook into a list of glossary-term dicts (deduped by source)."""
-    import openpyxl
+    try:
+        import openpyxl
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError("Reading .xlsx term bases needs: pip install 'dev-titles[xlsx]'") from e
 
     ws = openpyxl.load_workbook(xlsx_path)["terms"]
     hdr = [str(c.value) if c.value is not None else "" for c in ws[1]]

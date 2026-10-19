@@ -181,8 +181,11 @@ def write_review_xlsx(rows: list[dict], path, title: str = "") -> dict:
     for the reviewer. Returns the verdict counts. ERROR auto-resolves; A_OK+EDGE = human."""
     from collections import Counter
 
-    import openpyxl
-    from openpyxl.styles import Alignment, Font, PatternFill
+    try:
+        import openpyxl
+        from openpyxl.styles import Alignment, Font, PatternFill
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError("Writing the .xlsx audit needs: pip install 'dev-titles[xlsx]'") from e
 
     order = {"ERROR": 0, "EDGE": 1, "A_OK": 2}
     rows = sorted(rows, key=lambda r: order.get(r.get("verdict", ""), 3))
