@@ -29,7 +29,7 @@ import argparse
 ap=argparse.ArgumentParser(); ap.add_argument("--spec",action="append",required=True,help="Video:lang"); ap.add_argument("--old-dir",default="output/ticket"); ap.add_argument("--new-dir",default="output/rerun_eval"); ap.add_argument("--out",default="output/benchmark"); ap.add_argument("--n",type=int,default=40); A=ap.parse_args()
 SPECS=[tuple(x.split(":")) for x in A.spec]
 import os; os.makedirs(A.out,exist_ok=True)
-P=open("/tmp/sev.py").read().split('P="""')[1].split('"""')[0]
+P=SEV_PROMPT
 def cache(p,lang): return {r["src"].strip():r["txt"] for r in map(json.loads,open(p)) if r.get("lang")==lang}
 N=lambda s: re.sub(r"\s","",s or "")
 rows=[];stats={}
