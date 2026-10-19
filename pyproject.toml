@@ -22,6 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tmx = ["defusedxml>=0.7"]                            # TMX translation-memory import (hardened XML parser)
 cjk = ["fugashi[unidic-lite]>=1.3", "jieba>=0.42"]  # word-safe CJK line-breaking
 whisper = ["whisperx>=3.1"]                          # local ASR (needs ffmpeg on PATH)
 parakeet = ["parakeet-mlx"]                          # fast local ASR (Apple Silicon / MLX only)
@@ -33,7 +34,7 @@ youtube = ["yt-dlp", "google-api-python-client>=2.0", "google-auth-oauthlib>=1.0
 xlsx = ["openpyxl>=3.1"]                             # .xlsx term-base import + audit report
 qe = ["unbabel-comet>=2.2"]                          # optional CometKiwi QE (gated HF model: accept license + hf auth login)
 search = ["ddgs>=6.0"]  # DuckDuckGo fallback for auto doc-grounding (Google CSE needs no dep)
-dev = ["pytest>=8.0", "pytest-cov", "black", "isort", "flake8", "mypy"]
+dev = ["pytest>=8.0", "bandit>=1.7", "defusedxml>=0.7", "pytest-cov", "black", "isort", "flake8", "mypy"]
 
 [project.scripts]
 dev-titles = "dev_titles.cli:main"

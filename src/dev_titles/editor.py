@@ -72,7 +72,7 @@ context. Prefer B only if a native viewer would genuinely find it better."""
 
 
 def _h(s: str) -> str:
-    return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1((s or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def _toks(s, rx):
@@ -376,7 +376,7 @@ def video_brief(en_text: str, invoke, cache_path=None, description: str = "", ch
     summarized chunk by chunk first (map-reduce) so a late-introduced guest or topic isn't missed.
     Cached per out dir; regenerated when the description or transcript changes."""
     p = Path(cache_path) if cache_path else None
-    key = hashlib.sha1((description + "\x00" + en_text).encode("utf-8")).hexdigest()[:16]
+    key = hashlib.sha1((description + "\x00" + en_text).encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     if p and p.exists():
         txt = p.read_text(encoding="utf-8")
         if txt.startswith(f"# {key}\n"):

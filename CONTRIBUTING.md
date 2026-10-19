@@ -7,6 +7,21 @@ pytest                           # full suite
 ```
 See [DEVELOPMENT.md](DEVELOPMENT.md) for linting, coverage and docs.
 
+## Pre-push checks
+
+Enable the pre-push hook once per clone:
+
+```bash
+pip install bandit defusedxml
+git config core.hooksPath hooks
+```
+
+Every `git push` then runs the test suite and a [Bandit](https://bandit.readthedocs.io) security
+scan (medium severity and up) on `src/` and `scripts/`. The suite includes a check that no code
+reads or writes fixed temp or home paths (`/tmp/...`, `/Users/...`): use `tempfile` or a path
+inside the project. A reviewed false positive can be marked `# nosec <ID>`, with the reason in a
+comment on the line above. `PRE_PUSH_SKIP=1 git push` bypasses the hook deliberately.
+
 ## Ground rules
 - **Determinism first.** The harness is the deterministic scaffold around the LLM steps:
   segmentation, glossary/DNT enforcement, CJK re-segmentation, validation, and lossless guards.

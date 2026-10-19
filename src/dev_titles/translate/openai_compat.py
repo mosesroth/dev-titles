@@ -26,8 +26,11 @@ from .prompts import build_reflect_prompt, build_translate_prompt
 
 
 def _default_post(url: str, body: dict, headers: dict, timeout: float) -> dict:
+    if not url.lower().startswith(("https://", "http://")):
+        raise RuntimeError(f"OPENAI_BASE_URL must be an http(s) URL (got {url[:80]})")
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # scheme restricted to http(s) above; Bandit can't see that check
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
         return json.loads(resp.read().decode("utf-8"))
 
 

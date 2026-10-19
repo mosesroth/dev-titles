@@ -351,6 +351,9 @@ def test_parakeet_words_from_tokens():
 
 
 def test_tm_import_tmx(tmp_path):
+    import pytest
+
+    pytest.importorskip("defusedxml")  # optional `tmx` extra
     from dev_titles.tm import TranslationMemory
 
     tmx = tmp_path / "t.tmx"

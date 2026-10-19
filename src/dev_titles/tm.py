@@ -64,7 +64,10 @@ class TranslationMemory:
         (vendor Gold/Silver TMs can be GB-scale). Maps tmx codes en-us/zh-cn/ja-jp to ours.
         Import Gold AFTER Silver so Gold (LQA'ed) wins the last-write exact key. Deferred/
         opt-in: such TMs are typically UI/doc strings, so subtitle exact-match hits are rare."""
-        import xml.etree.ElementTree as ET
+        try:  # vendor TMX files are untrusted input: parse with the hardened parser
+            from defusedxml.ElementTree import iterparse
+        except ImportError as e:  # pragma: no cover
+            raise RuntimeError("TMX import needs defusedxml: pip install defusedxml") from e
 
         XLANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
@@ -77,7 +80,7 @@ class TranslationMemory:
             )
 
         n = 0
-        for _, elem in ET.iterparse(str(path), events=("end",)):
+        for _, elem in iterparse(str(path), events=("end",)):
             if elem.tag.split("}")[-1] != "tu":
                 continue
             by: dict[str, str] = {}

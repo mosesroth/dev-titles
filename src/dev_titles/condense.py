@@ -169,7 +169,7 @@ DEFAULT_EXAMPLES_JA = [
 def _h(s: str) -> str:
     import hashlib
 
-    return hashlib.sha1((s or "").encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1((s or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def condense_lang(

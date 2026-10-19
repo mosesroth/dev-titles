@@ -1,0 +1,29 @@
+#!/bin/sh
+# Pre-push gate: the test suite (incl. the no-machine-paths check) + Bandit security scan
+# (medium severity and up) on src/ and scripts/. Catches common patterns security
+# scanners flag (temp-dir files, weak hashes, unsafe XML/URL handling) before they land.
+# Enable once per clone:  git config core.hooksPath hooks
+# Deliberate bypass:      PRE_PUSH_SKIP=1 git push …
+set -e
+if [ -n "$PRE_PUSH_SKIP" ]; then
+    echo "pre-push: SKIPPED via PRE_PUSH_SKIP — no checks ran." >&2
+    exit 0
+fi
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+python3 -c "import bandit" 2>/dev/null || {
+    echo "pre-push: bandit is not installed (pip install bandit) — refusing to push unscanned." >&2
+    exit 1
+}
+echo "pre-push: tests…"
+PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider -o addopts="" test >/dev/null 2>&1 || {
+    echo "pre-push: tests FAILED — run: PYTHONPATH=src python3 -m pytest test" >&2
+    exit 1
+}
+echo "pre-push: bandit (medium+)…"
+python3 -m bandit -q -r src scripts -ll || {
+    echo "pre-push: Bandit found medium/high issues above — fix them (or mark a reviewed false" >&2
+    echo "          positive with '# nosec <ID> — reason') before pushing." >&2
+    exit 1
+}
+echo "pre-push: OK"

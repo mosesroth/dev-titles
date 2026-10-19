@@ -362,8 +362,11 @@ def http_fetch(url: str, timeout: int = 20) -> str:
     INTERNAL/authenticated docs the agent/skill should use a docs MCP instead."""
     import urllib.request
 
+    if not url.lower().startswith(("https://", "http://")):
+        raise ValueError(f"refusing to fetch non-http(s) URL: {url[:80]}")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 dev-titles"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    # scheme restricted to http(s) above; Bandit can't see that check
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
         html = r.read().decode("utf-8", "ignore")
     html = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", html)
     return re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", html)).strip()
