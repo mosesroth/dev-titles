@@ -15,7 +15,10 @@ layout rules, validation and the guards that keep the LLM honest.
    [Parakeet](https://github.com/senstella/parakeet-mlx) (`parakeet-mlx`, Apple Silicon).
    It includes a WhisperX cross-check that splices back spans Parakeet silently drops on
    music or non-speech. [WhisperX](https://github.com/m-bain/whisperX) large-v3 works on
-   any platform. AssemblyAI is an optional cloud engine with speaker diarization. A second
+   any platform. `--engine auto` (the default) picks Parakeet on Apple Silicon when it is
+   installed, else WhisperX. [AssemblyAI](https://www.assemblyai.com) is an optional cloud
+   engine with speaker diarization; it uploads the audio and uses your own AssemblyAI account
+   (it has a free plan). A second
    ASR pass from a different model family can flag disagreements as suspects.
 2. **Clean-read correction.** Fixes misheard jargon against the glossary, rejoins
    spelled-out identifiers, drops filler and false starts, and corrects small grammar
@@ -74,8 +77,9 @@ Requires Python 3.10+ and `ffmpeg` on `PATH` for media input.
 ```bash
 git clone <this repo> dev-titles && cd dev-titles
 pip install -e '.[cjk]'            # core + word-safe CJK line breaking
-pip install -e '.[cjk,parakeet]'   # + Parakeet ASR (Apple Silicon only)
-pip install -e '.[cjk,whisper]'    # + WhisperX ASR (cross-platform; ~4 GB of models on first run)
+pip install -e '.[cjk,parakeet,whisper]'  # Apple Silicon: Parakeet ASR + WhisperX drop recovery
+pip install -e '.[cjk,whisper]'           # any platform: WhisperX ASR (~4 GB of models on first run)
+pip install -e '.[cjk,assemblyai]'        # cloud ASR instead: AssemblyAI ($ASSEMBLYAI_API_KEY)
 pip install -e '.[youtube]'        # + YouTube URL input / caption publishing
 pip install -e '.[dev]'            # tests and linters
 ```
@@ -96,7 +100,7 @@ dev-titles run https://youtu.be/VIDEO_ID --out bundle/ --transcribe-only
 dev-titles run talk.en.srt --out bundle/ --lang ja --qe-judge
 
 # Useful run options
-#   --engine {parakeet,whisper,assemblyai}   primary ASR (default parakeet)
+#   --engine {auto,parakeet,whisper,assemblyai}   primary ASR (default auto)
 #   --second-pass whisper|parakeet|<size>    2nd ASR; disagreements flagged as suspects
 #   --lang zh-Hans --lang ja                 target languages (default: both)
 #   --glossary glossary/glossary.yaml        shared glossary
@@ -209,7 +213,7 @@ local models may struggle with the long, style-heavy prompts.
 
 | Role | Default | Alternatives |
 |---|---|---|
-| ASR | local Parakeet / WhisperX (nothing leaves the machine) | AssemblyAI (`$ASSEMBLYAI_API_KEY`), AWS Transcribe JSON via `buildcues` |
+| ASR | local Parakeet / WhisperX (nothing leaves the machine; no account) | AssemblyAI (`--engine assemblyai`, your own account via `$ASSEMBLYAI_API_KEY`; free plan available; uploads the audio), AWS Transcribe JSON via `buildcues` |
 
 Credentials are always read from the environment or from each tool's own config, never from
 the repo. If a required credential is missing, the tool exits with a clear message.

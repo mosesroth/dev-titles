@@ -587,6 +587,35 @@ def _qe_second_judge(args):
     return judge
 
 
+def _resolve_engine(name: str) -> str:
+    """--engine auto: Parakeet on Apple Silicon when parakeet-mlx is installed (fastest, best on
+    jargon), else WhisperX when installed; otherwise stop with the install options."""
+    if name != "auto":
+        return name
+    import importlib.util
+    import os
+    import platform
+
+    apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
+    if apple_silicon and importlib.util.find_spec("parakeet_mlx"):
+        return "parakeet"
+    if importlib.util.find_spec("whisperx"):
+        print("ASR: WhisperX (Parakeet needs Apple Silicon + parakeet-mlx)" if not apple_silicon
+              else "ASR: WhisperX (parakeet-mlx not installed)")
+        return "whisper"
+    if os.environ.get("ASSEMBLYAI_API_KEY"):
+        print("ASR: AssemblyAI (no local ASR installed; $ASSEMBLYAI_API_KEY is set)")
+        return "assemblyai"
+    raise SystemExit(
+        "No speech-recognition engine installed. Pick one:\n"
+        + ("  pip install 'dev-titles[parakeet,whisper]'   # Parakeet + WhisperX drop recovery (Apple Silicon)\n"
+           if apple_silicon else "")
+        + "  pip install 'dev-titles[whisper]'            # WhisperX, local, any platform\n"
+        "  pip install 'dev-titles[assemblyai]'         # AssemblyAI cloud: set $ASSEMBLYAI_API_KEY, --engine assemblyai\n"
+        "Or pass an existing English subtitle file instead of media."
+    )
+
+
 def _second_transcriber(name: str, device: str):
     """Pick the 2nd-ASR engine for the cross-check. `parakeet` (or a
     `parakeet-*`/`mlx-community/*` model id) routes to the DIFFERENT-architecture
@@ -694,7 +723,7 @@ def cmd_run(args) -> int:
         if raw_p.exists() and not args.retranscribe:
             transcript = _load_raw(raw_p)
             print(f"Reusing saved raw transcript ({len(transcript.words)} words) — skip ASR")
-        elif args.engine == "parakeet":
+        elif (engine := _resolve_engine(args.engine)) == "parakeet":
             # Parakeet (parakeet-mlx): ~20-30x faster than WhisperX-CPU and gets the
             # technical proper nouns right (React Native/MCP/Claude Code) where Whisper mis-hears
             # them confidently. Its own errors are cosmetic (segmentation / British
@@ -724,9 +753,16 @@ def cmd_run(args) -> int:
                         else "  no dropped spans found"
                     )
                 except Exception as e:
-                    print(f"  recovery skipped ({type(e).__name__}); Parakeet output kept")
+                    if "pip install" in str(e):  # WhisperX not installed: say so loudly
+                        print(
+                            "  WARNING: drop recovery is OFF — WhisperX is not installed, so speech "
+                            "Parakeet drops over music/non-speech will be missing. Install it with "
+                            "pip install 'dev-titles[whisper]' (or pass --no-recover to silence this)."
+                        )
+                    else:
+                        print(f"  recovery skipped ({type(e).__name__}: {str(e)[:120]}); Parakeet output kept")
             _save_raw(transcript, raw_p)
-        elif args.engine == "assemblyai":
+        elif engine == "assemblyai":
             # AssemblyAI cloud (Universal + diarization) — for public interview content.
             # A/B showed it isn't more COMPLETE than Parakeet, but transcribes conversational
             # JARGON right at the source (fewer real errors: 1 vs 4 on a 10-min interview), for
@@ -1192,11 +1228,12 @@ def main(argv=None) -> int:
     )
     rn.add_argument(
         "--engine",
-        choices=["whisper", "parakeet", "assemblyai"],
-        default="parakeet",
-        help="primary ASR: parakeet (fast, local; default), whisper (WhisperX "
-        "large-v3; slower on CPU), or assemblyai (cloud, diarized; for the "
-        "PUBLIC interview backlog — cleaner jargon; needs $ASSEMBLYAI_API_KEY)",
+        choices=["auto", "whisper", "parakeet", "assemblyai"],
+        default="auto",
+        help="primary ASR: auto (default: parakeet on Apple Silicon if installed, else "
+        "whisper), parakeet (fast, local; Apple Silicon), whisper (WhisperX large-v3, local, "
+        "any platform; slower on CPU), or assemblyai (cloud, diarized; uploads the audio; "
+        "needs $ASSEMBLYAI_API_KEY)",
     )
     rn.add_argument(
         "--no-recover",

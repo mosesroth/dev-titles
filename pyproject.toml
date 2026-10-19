@@ -25,6 +25,7 @@ dependencies = [
 cjk = ["fugashi[unidic-lite]>=1.3", "jieba>=0.42"]  # word-safe CJK line-breaking
 whisper = ["whisperx>=3.1"]                          # local ASR (needs ffmpeg on PATH)
 parakeet = ["parakeet-mlx"]                          # fast local ASR (Apple Silicon / MLX only)
+assemblyai = ["requests>=2.31"]                      # AssemblyAI cloud ASR ($ASSEMBLYAI_API_KEY)
 api = ["anthropic>=0.40"]                            # Claude via the first-party Anthropic API
 bedrock = ["anthropic[bedrock]>=0.40"]               # Claude on AWS Bedrock (optional)
 aws = ["boto3>=1.34"]

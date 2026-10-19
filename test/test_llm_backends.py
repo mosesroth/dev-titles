@@ -115,3 +115,29 @@ def test_codex_translator_retries_empty_output(monkeypatch):
     t = ct.CodexTranslator(judge=type("C", (), {"invoke": lambda self, p: ""})(), retries=1)
     with pytest.raises(RuntimeError, match="codex login"):
         t._invoke("x")
+
+
+def test_asr_engine_auto(monkeypatch):
+    import importlib.util
+    import platform
+    import sys
+
+    from dev_titles import cli
+
+    have = set()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n: object() if n in have else None)
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
+    assert cli._resolve_engine("whisper") == "whisper"  # explicit choice untouched
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    have.update({"parakeet_mlx", "whisperx"})
+    assert cli._resolve_engine("auto") == "whisper"  # Parakeet needs Apple Silicon
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    assert cli._resolve_engine("auto") == "parakeet"
+    have.clear()
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "k")
+    assert cli._resolve_engine("auto") == "assemblyai"
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY")
+    with pytest.raises(SystemExit, match="No speech-recognition engine"):
+        cli._resolve_engine("auto")

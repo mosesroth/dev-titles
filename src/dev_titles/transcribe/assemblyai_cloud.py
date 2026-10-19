@@ -8,7 +8,7 @@ correctly at the source (React Native / agentic / boilerplate) with none of Para
 conversational garbles — a cleaner input to translation. Use for interviews only if a
 pilot shows Parakeet's residual garbles matter; local Parakeet remains the default.
 
-Key from $ASSEMBLYAI_API_KEY (never hard-code / commit it). `pip install requests`.
+Key from $ASSEMBLYAI_API_KEY (never hard-code / commit it). `pip install 'dev-titles[assemblyai]'`.
 """
 
 from __future__ import annotations
@@ -96,7 +96,10 @@ class AssemblyAITranscriber(Transcriber):
         self.timeout = timeout
 
     def transcribe(self, media_path, *, language="en", custom_vocabulary=None) -> Transcript:
-        import requests
+        try:
+            import requests
+        except ImportError as e:  # pragma: no cover
+            raise RuntimeError("Install AssemblyAI deps: pip install 'dev-titles[assemblyai]'") from e
 
         if not self.api_key:
             raise RuntimeError("Set ASSEMBLYAI_API_KEY (or pass api_key=)")
