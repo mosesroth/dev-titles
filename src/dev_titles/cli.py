@@ -106,18 +106,18 @@ def cmd_pilot(args) -> int:
     """Run the pilot harness over clips with the CLI translator engine."""
     from .glossary import load as load_glossary
     from .pilot import EngineSpec, load_clip, run_pilot
-    from .translate import CliTranslator
+    from . import llm
 
     langs = args.lang or ["zh-Hans", "ja"]
     glossary = load_glossary(args.glossary)
     clips = [load_clip(p) for p in args.inputs]
-    translator = CliTranslator(model_id=args.model)  # None -> CLI default model
+    translator = llm.translator(model_id=args.model)  # None -> CLI default model
     engine = EngineSpec(name=args.engine_name, translator=translator, reflect=not args.no_reflect)
     qe_scorer = None
     if args.gemba:
         from .eval import GembaMqmScorer
 
-        qe_scorer = GembaMqmScorer(invoke=CliTranslator(model_id=args.model)._invoke)
+        qe_scorer = GembaMqmScorer(invoke=llm.translator(model_id=args.model)._invoke)
     report = run_pilot(
         clips, [engine], glossary, target_langs=tuple(langs), qe_scorer=qe_scorer, out_dir=args.out
     )
@@ -136,9 +136,9 @@ def _maybe_clean(sub, do_clean: bool):
     if not do_clean:
         return sub
     from .cleanup import polish_subtitle
-    from .translate import CliTranslator
+    from . import llm
 
-    return polish_subtitle(sub, CliTranslator()._invoke)
+    return polish_subtitle(sub, llm.invoke())
 
 
 def cmd_buildcues(args) -> int:
@@ -221,9 +221,9 @@ def _en_review(en, out, title: str = ""):
         return en
     from .transcribe_qe import en_autofix
     from .transcribe_qe import en_review as _rev
-    from .translate import CliTranslator
+    from . import llm
 
-    invoke = CliTranslator()._invoke
+    invoke = llm.invoke()
     try:
         issues = _rev(en, invoke)
     except Exception as e:
@@ -292,7 +292,7 @@ def cmd_localize(args) -> int:
     from .glossary import load as load_glossary
     from .localize import localize_en
     from .review import build_review_bundle
-    from .translate import CliTranslator
+    from . import llm
 
     from .cue_builder import strip_sound_tags
 
@@ -337,7 +337,7 @@ def cmd_localize(args) -> int:
     _save_description_file(args)
     outputs = localize_en(
         en,
-        CliTranslator(),
+        llm.translator(),
         glossary,
         langs=langs,
         video_vocab=video_vocab,
@@ -388,7 +388,7 @@ def _correct_transcript(transcript, glossary, video_vocab, names=None):
     from .cleanup import correct_transcript
     from .cue_builder import low_confidence_spans
     from .transcribe.retime import retime_corrected
-    from .translate import CliTranslator
+    from . import llm
 
     terms = sorted(
         {f for t in glossary.terms for f in t.all_source_forms if any(c.isalpha() for c in f)}
@@ -399,7 +399,7 @@ def _correct_transcript(transcript, glossary, video_vocab, names=None):
         names += video_vocab.get("names", [])
     suspects = [s["word"] for s in low_confidence_spans(transcript, threshold=0.5)]
     corrected = correct_transcript(
-        CliTranslator()._invoke,
+        llm.invoke(),
         transcript.text,
         terms,
         suspect_words=suspects,
@@ -413,13 +413,13 @@ def cmd_audit(args) -> int:
     """Audit OURS against a REFERENCE subtitle: substantive word-diffs, LLM-classified
     (ERROR/A_OK/EDGE), into a verdict-labeled review sheet. Transcription or translation."""
     from .audit import classify, word_diffs, write_review_xlsx
-    from .translate import CliTranslator
+    from . import llm
 
     ours = _read_any(args.ours, args.lang or "en")
     ref = _read_any(args.reference, args.lang or "en")
     rows = word_diffs(ours, ref)
     print(f"{len(rows)} substantive diffs; classifying…")
-    classify(rows, CliTranslator()._invoke, domain=args.domain, lang=args.lang or "")
+    classify(rows, llm.invoke(), domain=args.domain, lang=args.lang or "")
     out = Path(args.out)
     counts = write_review_xlsx(rows, out, title=args.title or Path(args.ours).stem)
     print(f"verdicts {counts} -> {out}")
@@ -519,7 +519,7 @@ def cmd_rescore(args) -> int:
     from .glossary import load as load_glossary
     from .localize import SentenceRecord, _write_status, llm_serialize_lock
     from .review import LangOutput, render_review_markdown
-    from .translate import CliTranslator
+    from . import llm
     from .translation_qe import translation_suspects
 
     out = Path(args.out)
@@ -529,7 +529,7 @@ def cmd_rescore(args) -> int:
         return 2
     en = _read_any(str(en_p), "en")
     glossary = load_glossary(args.glossary)
-    inv = CliTranslator()._invoke
+    inv = llm.invoke()
     second = _qe_second_judge(args)
     outputs = []
     for lang in ("zh-Hans", "ja"):
@@ -569,23 +569,22 @@ def _save_description_file(args):
 
 
 def _qe_second_judge(args):
-    """The different-family second judge for the two-judge QE panel: Codex CLI
-    (GPT-5.x). Only when --qe-judge and the codex binary is present; else None
-    (single Claude judge). De-biases Claude-grading-Claude self-preference."""
+    """The different-family second judge for the two-judge QE panel (Claude <-> GPT, see llm.py).
+    Only with --qe-judge; None when disabled or no other family is installed (single judge).
+    De-biases a model grading its own family's output (self-preference)."""
     if not getattr(args, "qe_judge", False):
         return None
+    from . import llm
+
     if getattr(args, "single_judge", False):
-        print("QE judge: single-judge (Claude only) — codex 2nd judge disabled via --single-judge")
+        print(f"QE judge: single-judge ({llm.label()} only) — 2nd judge disabled via --single-judge")
         return None
-    import os
-
-    from .eval.codex_judge import DEFAULT_BINARY, CodexCliJudge
-
-    if not os.path.exists(DEFAULT_BINARY):
-        print("QE judge: codex binary not found — single-judge (Claude) DQF only")
+    judge, what = llm.second_judge()
+    if judge is None:
+        print(f"QE judge: {what} — single-judge ({llm.label()}) DQF only")
         return None
-    print("QE judge: two-judge panel (Claude + Codex/GPT-5.x)")
-    return CodexCliJudge().invoke
+    print(f"QE judge: two-judge panel ({llm.label()} + {what})")
+    return judge
 
 
 def _second_transcriber(name: str, device: str):
@@ -633,7 +632,7 @@ def cmd_run(args) -> int:
     from .localize import localize_en
     from .review import build_review_bundle
     from .transcribe import WhisperTranscriber
-    from .translate import CliTranslator
+    from . import llm
 
     ri = resolve_input(args.input, workdir=str(Path(args.out) / "_ingest"))
     out = Path(args.out)
@@ -804,7 +803,7 @@ def cmd_run(args) -> int:
         if not args.no_prep and not _have_vocab:
             from .vocab_prep import build_video_vocab, curated_forms, http_fetch, identify_subject
 
-            inv = CliTranslator()._invoke
+            inv = llm.invoke()
             subj = identify_subject(transcript.text, inv)
             urls = list(args.docs_url or []) + (subj.get("doc_urls") or [])
             if not urls and not args.no_search:
@@ -931,7 +930,7 @@ def cmd_run(args) -> int:
                 autosub = load_autosub(ri.auto_captions)
                 en_text = " ".join(" ".join(c.lines) for c in en.cues)
                 flags = [
-                    p["phrase"] for p in plausibility_suspects(CliTranslator()._invoke, en_text)
+                    p["phrase"] for p in plausibility_suspects(llm.invoke(), en_text)
                 ]
                 fixes = autosub_consult(
                     en, recovery_second, autosub, flags, logger=lambda m: print(m, flush=True)
@@ -956,7 +955,7 @@ def cmd_run(args) -> int:
                     ri.path, language="en"
                 )
             suspects = transcription_suspects(
-                raw_transcript, CliTranslator()._invoke, second_transcript=second_asr, corrected=en
+                raw_transcript, llm.invoke(), second_transcript=second_asr, corrected=en
             )
             write_suspects_md(suspects, out / "suspects.md", ri.title)
             print(f"Reference-free QE: {len(suspects)} suspects to spot-check -> {out}/suspects.md")
@@ -971,7 +970,7 @@ def cmd_run(args) -> int:
     _save_description_file(args)
     outputs = localize_en(
         en,
-        CliTranslator(),
+        llm.translator(),
         glossary,
         langs=langs,
         video_vocab=video_vocab,
@@ -1016,6 +1015,15 @@ def cmd_promote_terms(args) -> int:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="dev_titles")
+    p.add_argument(
+        "--llm",
+        choices=("claude", "codex", "openai"),
+        default=None,
+        help="primary model backend: claude (local Claude Code CLI, default), codex (local OpenAI "
+        "Codex CLI, e.g. signed in with ChatGPT), openai (any OpenAI-compatible API via "
+        "$OPENAI_API_KEY / $OPENAI_BASE_URL). Also $DEV_TITLES_LLM.",
+    )
+    p.add_argument("--llm-model", default=None, help="model id for the --llm backend (required for openai)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     v = sub.add_parser("validate", help="check a subtitle file against per-language rules")
@@ -1110,14 +1118,14 @@ def main(argv=None) -> int:
         "--qe-judge",
         action="store_true",
         dest="qe_judge",
-        help="add the LLM MQM two-judge panel (Claude + Codex/GPT-5.x if installed) "
+        help="add the LLM MQM two-judge panel (primary model + a different-family judge if installed) "
         "scored via calibrated DQF; deterministic QE runs regardless",
     )
     rn.add_argument(
         "--single-judge",
         action="store_true",
         dest="single_judge",
-        help="force Claude-only QE (disable the codex/GPT-5.x 2nd judge) — use when "
+        help="force single-model QE (disable the different-family 2nd judge) — use when "
         "codex/Bedrock is unavailable",
     )
     rn.add_argument(
@@ -1262,14 +1270,14 @@ def main(argv=None) -> int:
         "--qe-judge",
         action="store_true",
         dest="qe_judge",
-        help="add the LLM MQM two-judge panel (Claude + Codex/GPT-5.x if installed) "
+        help="add the LLM MQM two-judge panel (primary model + a different-family judge if installed) "
         "scored via calibrated DQF; deterministic QE runs regardless",
     )
     lo.add_argument(
         "--single-judge",
         action="store_true",
         dest="single_judge",
-        help="force Claude-only QE (disable the codex/GPT-5.x 2nd judge) — use when "
+        help="force single-model QE (disable the different-family 2nd judge) — use when "
         "codex/Bedrock is unavailable",
     )
     lo.add_argument(
@@ -1341,7 +1349,7 @@ def main(argv=None) -> int:
         "--qe-judge", action="store_true", default=True, help="run the LLM MQM panel (default on)"
     )
     rs.add_argument(
-        "--single-judge", action="store_true", help="Claude-only DQF (skip the codex 2nd judge)"
+        "--single-judge", action="store_true", help="primary-model-only DQF (skip the different-family 2nd judge)"
     )
     rs.set_defaults(func=cmd_rescore)
 
@@ -1391,6 +1399,9 @@ def main(argv=None) -> int:
     pt.set_defaults(func=cmd_promote_terms)
 
     args = p.parse_args(argv)
+    from . import llm
+
+    llm.configure(args.llm, args.llm_model)
     return args.func(args)
 
 

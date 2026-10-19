@@ -30,7 +30,7 @@ from pathlib import Path
 
 from dev_titles.cli import _qe_second_judge
 from dev_titles.editor import PAIR_PROMPT, _parse_json_array
-from dev_titles.translate import CliTranslator
+from dev_titles import llm
 
 LNAME = {"ja": "Japanese", "zh-Hans": "Simplified Chinese"}
 RATE = """You are a native {L} speaker and professional subtitle reviewer. For each item: an English line and a
@@ -81,7 +81,7 @@ def main():
             if l.strip():
                 d = json.loads(l)
                 ver[d["key"]] = d
-    inv = CliTranslator()._invoke
+    inv = llm.invoke()
     gpt = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
     todo = [r for r in rows if key(r) not in ver]
     if todo:

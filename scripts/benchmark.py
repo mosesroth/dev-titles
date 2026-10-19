@@ -23,8 +23,8 @@ Return ONLY a JSON array: {{"id": n, "level": "OK|NOTICEABLE|MEANING", "why": "<
 from dev_titles.cli import _read_any
 from dev_titles.formats.vtt import read_vtt
 from dev_titles.resegment import merge_en_to_sentences
-from dev_titles.translate import CliTranslator
-inv=CliTranslator()._invoke
+from dev_titles import llm
+inv=llm.invoke()
 import argparse
 ap=argparse.ArgumentParser(); ap.add_argument("--spec",action="append",required=True,help="Video:lang"); ap.add_argument("--old-dir",default="output/ticket"); ap.add_argument("--new-dir",default="output/rerun_eval"); ap.add_argument("--out",default="output/benchmark"); ap.add_argument("--n",type=int,default=40); A=ap.parse_args()
 SPECS=[tuple(x.split(":")) for x in A.spec]

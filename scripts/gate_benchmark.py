@@ -38,7 +38,7 @@ from dev_titles.editor import (
     video_description,
 )
 from dev_titles.resegment import merge_en_to_sentences
-from dev_titles.translate import CliTranslator
+from dev_titles import llm
 
 LNAME = {"ja": "Japanese", "zh-Hans": "Simplified Chinese"}
 GRADE = """You are a native {L} speaker and professional subtitle reviewer. For each item: the English line, a
@@ -164,10 +164,10 @@ def main():
     ap.add_argument("--out", default="output/gate_bench")
     a = ap.parse_args()
     Path(a.out).mkdir(parents=True, exist_ok=True)
-    inv = CliTranslator()._invoke
+    inv = llm.invoke()
     gpt = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
     if gpt is None:
-        raise SystemExit("second judge (codex) unavailable")
+        raise SystemExit("no different-family second judge available (needs both the claude and codex CLIs)")
     allsug, total = [], 0
     for v in a.video:
         try:

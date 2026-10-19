@@ -247,11 +247,35 @@ def test_ensure_clean_codex_home_mirrors_model_strips_mcp_plugins():
     assert 'model = "openai.gpt-5.6-sol"' in out  # mirrored model
     assert 'profile = "p"' in out and "us-east-2" in out  # mirrored aws provider
     assert "mcp_servers" not in out and "[plugins" not in out and "marketplaces" not in out
-    # falls back to sane Bedrock defaults when the source config is unreadable
+    assert 'forced_login_method = "api"' in out  # custom provider -> API login
+    # no readable config -> codex's own defaults (OpenAI provider, the user's login), no Bedrock
     home2 = os.path.join(d, "judge2")
     ensure_clean_codex_home(home2, src_home=os.path.join(d, "nonexistent"))
     out2 = open(os.path.join(home2, "config.toml")).read()
-    assert 'model = "openai.gpt-5.6-sol"' in out2 and "mcp_servers" not in out2
+    assert "model_provider" not in out2 and "forced_login_method" not in out2 and "mcp_servers" not in out2
+
+
+def test_clean_codex_home_keeps_chatgpt_login():
+    """A ChatGPT-subscriber setup (default OpenAI provider, login in auth.json) keeps working:
+    no forced API login, no provider override, and the user's auth.json is linked in."""
+    import os
+    import tempfile
+
+    from dev_titles.eval.codex_judge import ensure_clean_codex_home
+
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src")
+    os.makedirs(src)
+    with open(os.path.join(src, "config.toml"), "w") as fh:
+        fh.write('model = "gpt-5.5"\n[mcp_servers.x]\ncommand = "x"\n')
+    with open(os.path.join(src, "auth.json"), "w") as fh:
+        fh.write('{"auth_mode": "chatgpt"}')
+    home = os.path.join(d, "judge")
+    ensure_clean_codex_home(home, src_home=src)
+    out = open(os.path.join(home, "config.toml")).read()
+    assert 'model = "gpt-5.5"' in out and "forced_login_method" not in out and "model_provider" not in out
+    assert "mcp_servers" not in out
+    assert open(os.path.join(home, "auth.json")).read() == '{"auth_mode": "chatgpt"}'
 
 
 def test_correct_transcript_completeness_guard():

@@ -25,7 +25,7 @@ from gate_compare import LNAME, rate  # noqa: E402
 from dev_titles.cli import _qe_second_judge, _read_any
 from dev_titles.editor import PAIR_PROMPT
 from dev_titles.resegment import merge_en_to_sentences
-from dev_titles.translate import CliTranslator
+from dev_titles import llm
 
 
 def main():
@@ -53,7 +53,7 @@ def main():
             x["ctx"] = " ".join(srcs[j] for j in (x["i"] - 1, x["i"] + 1) if j in srcs)
         pool += [x for x in s if x["ref"]]
     print(f"{len(pool)} meaning-rejected suggestions to grade", flush=True)
-    inv = CliTranslator()._invoke
+    inv = llm.invoke()
     gpt = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
     items = []
     for n, x in enumerate(pool):

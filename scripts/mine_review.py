@@ -25,7 +25,7 @@ from pathlib import Path
 
 from dev_titles.cli import _read_any
 from dev_titles.resegment import merge_en_to_sentences
-from dev_titles.translate import CliTranslator
+from dev_titles import llm
 
 CURATE = """You curate teaching examples for a {L} subtitle editor. Each item is an English line, our MACHINE
 subtitle, and the HUMAN reviewer's final subtitle. Keep ONLY items where the human edit fixes something a
@@ -96,7 +96,7 @@ def main():
         except FileNotFoundError as e:
             print(f"  skip {v}: {e}")
     print(f"{len(pairs)} candidate pairs from {len(a.video) - len(a.exclude)} videos")
-    inv = CliTranslator()._invoke
+    inv = llm.invoke()
     kept = []
     for k in range(0, len(pairs), 40):
         chunk = pairs[k : k + 40]

@@ -178,15 +178,41 @@ Terminology has two layers:
 
 ## LLM backends
 
+Every model call is "prompt in, text out", so you can pick the model that does the work:
+
+```bash
+dev-titles run talk.mp4 --out bundle/                               # Claude (default)
+dev-titles --llm codex run talk.mp4 --out bundle/                   # GPT via the Codex CLI
+dev-titles --llm openai --llm-model gpt-5.5 run talk.mp4 --out bundle/
+OPENAI_BASE_URL=http://localhost:11434/v1 dev-titles --llm openai --llm-model qwen3 run …   # local model
+```
+
+| `--llm` | Uses | Sign-in |
+|---|---|---|
+| `claude` (default) | the `claude` CLI ([Claude Code](https://docs.anthropic.com/claude-code)) | whatever Claude Code is signed in with: a Claude account, an Anthropic API key, or AWS Bedrock |
+| `codex` | the OpenAI [Codex CLI](https://github.com/openai/codex) (`codex exec`) | whatever Codex is signed in with: a **ChatGPT account** (`codex login`), an OpenAI API key, or a provider configured in `~/.codex` |
+| `openai` | any OpenAI-compatible chat API: OpenAI, Gemini's compatible endpoint, Ollama, LM Studio, vLLM… | `$OPENAI_API_KEY` (not needed for local servers); `$OPENAI_BASE_URL` (default `https://api.openai.com/v1`); `--llm-model` is required |
+
+You can also set the backend with `$DEV_TITLES_LLM` and `$DEV_TITLES_LLM_MODEL`. Override the
+binaries with `$CLAUDE_BINARY` / `$CODEX_BINARY`. From Python, `AnthropicTranslator` (Anthropic SDK)
+and `BedrockTranslator` (Claude on AWS Bedrock) are also available in `dev_titles.translate`.
+
+**Second judge.** With `--qe-judge`, the second judge is always from a *different* model family
+than the primary: Claude primary → GPT judge via Codex; GPT primary → Claude judge. If the
+other family isn't installed, the panel runs with the primary model alone. That still works,
+but the editor's acceptance gate was measured with two families checking each other, and one
+model judging its own suggestions is likely to let more bad edits through.
+
+**Quality.** The prompts, thresholds and acceptance gates were tuned and measured with Claude
+as the primary model. GPT and other models are expected to work but are unmeasured. Small
+local models may struggle with the long, style-heavy prompts.
+
 | Role | Default | Alternatives |
 |---|---|---|
-| Translation, clean-read, condensation, judge #1 | the `claude` CLI ([Claude Code](https://docs.anthropic.com/claude-code)), which uses whatever auth it is configured with (Anthropic account or API key, or AWS Bedrock) | `AnthropicTranslator` (Anthropic SDK, `ANTHROPIC_API_KEY`) or `BedrockTranslator` (Claude on AWS Bedrock, standard AWS credentials) in `dev_titles.translate` |
-| Judge #2 (different model family, optional) | the OpenAI **Codex CLI** (`codex exec`), auto-enabled if `codex` is on `PATH` (or `$CODEX_BINARY`) | `GptMantleJudge`: OpenAI models on AWS Bedrock via `$BEDROCK_API_KEY` / `$AWS_BEARER_TOKEN_BEDROCK` |
 | ASR | local Parakeet / WhisperX (nothing leaves the machine) | AssemblyAI (`$ASSEMBLYAI_API_KEY`), AWS Transcribe JSON via `buildcues` |
 
-Override the `claude` binary with `$CLAUDE_BINARY`. Credentials are always read from the
-environment or from each tool's own config, never from the repo. If a required credential
-is missing, the tool exits with a clear message.
+Credentials are always read from the environment or from each tool's own config, never from
+the repo. If a required credential is missing, the tool exits with a clear message.
 
 ## Development
 

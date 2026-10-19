@@ -1,17 +1,17 @@
-"""Non-Claude judge via the Codex CLI (OpenAI GPT-5.x, e.g. served from AWS Bedrock).
+"""Non-Claude model via the Codex CLI (OpenAI GPT models): the second QE judge, or the primary
+model with `--llm codex`. Codex uses whatever it is signed in with — a ChatGPT account, an
+OpenAI API key, or a custom provider such as AWS Bedrock configured in ~/.codex.
 
-De-biases the parity audit: our default judge is Opus (Claude) grading Claude
-output, which self-preference bias inflates. The Codex CLI can route to GPT-5.x on
-AWS Bedrock using your existing AWS credentials/profile (configured in ~/.codex), so
-no separate OpenAI key is needed.
+As a judge it de-biases the panel: Claude grading Claude output is inflated by
+self-preference.
 
 Non-interactive: `codex exec --skip-git-repo-check -o <file> -` with the prompt on
 stdin; the model's final message is written to <file>. `invoke(prompt) -> str`
 matches the callable the audit uses, so it drops in for `CliTranslator._invoke`.
 Install the Codex CLI and put it on $PATH (or set $CODEX_BINARY).
 
-CLEAN CODEX_HOME: the judge runs codex under a minimal, self-generated CODEX_HOME
-(`~/.codex_judge`) that mirrors the user's model + Bedrock provider but DROPS
+CLEAN CODEX_HOME: calls run codex under a minimal, self-generated CODEX_HOME
+(`~/.codex_judge`) that mirrors the user's model, provider and login but DROPS
 mcp_servers / plugins / marketplaces. With a heavily customized config, codex may load
 slow-starting MCP servers (init hang) + hundreds of plugin skills (context-budget blowout),
 which hangs / instantly compacts a scoring call; the clean home returns in ~15s. Related
@@ -31,54 +31,55 @@ import tempfile
 DEFAULT_BINARY = os.environ.get("CODEX_BINARY") or shutil.which("codex") or "codex"
 JUDGE_HOME = os.path.expanduser("~/.codex_judge")
 
-# Sane Bedrock defaults if the user's ~/.codex config is missing/unreadable.
-_JUDGE_DEFAULTS = {
-    "model": "openai.gpt-5.6-sol",
-    "effort": "low",
-    "provider": "amazon-bedrock",
-    "region": "us-east-2",
-    "profile": "default",
-    "base_url": "http://127.0.0.1:9",
-}
-
 
 def ensure_clean_codex_home(home: str = JUDGE_HOME, src_home: str = "~/.codex") -> str:
-    """Create/refresh a minimal CODEX_HOME for the judge: mirror the model + Bedrock provider
-    from the user's real ~/.codex config, but WITHOUT mcp_servers / plugins / marketplaces
-    (those hang or bloat codex startup and are irrelevant to a scoring call). Idempotent;
-    falls back to `_JUDGE_DEFAULTS` when the source config can't be read/parsed."""
-    d = dict(_JUDGE_DEFAULTS)
+    """Create/refresh a minimal CODEX_HOME for non-interactive calls: mirror the model and
+    provider from the user's real ~/.codex config, but WITHOUT mcp_servers / plugins /
+    marketplaces (those hang or bloat codex startup and are irrelevant to a scoring call).
+
+    Two setups are supported:
+      - default OpenAI provider (signed in with a ChatGPT account or an OpenAI API key): the
+        user's auth.json is linked into the clean home, so the same login is used;
+      - a custom provider such as AWS Bedrock (`model_provider` + `[model_providers.<p>.aws]`):
+        the provider block is mirrored and API login is forced.
+    Idempotent; with no readable config it falls back to codex's own defaults."""
+    src = os.path.expanduser(src_home)
+    cfg = {}
     try:
         import tomllib
 
-        with open(os.path.join(os.path.expanduser(src_home), "config.toml"), "rb") as fh:
+        with open(os.path.join(src, "config.toml"), "rb") as fh:
             cfg = tomllib.load(fh)
-        d["model"] = cfg.get("model") or d["model"]
-        d["effort"] = cfg.get("model_reasoning_effort") or d["effort"]
-        d["provider"] = cfg.get("model_provider") or d["provider"]
-        d["base_url"] = cfg.get("chatgpt_base_url") or d["base_url"]
-        aws = ((cfg.get("model_providers") or {}).get(d["provider"]) or {}).get("aws") or {}
-        d["region"] = aws.get("region") or d["region"]
-        d["profile"] = aws.get("profile") or d["profile"]
     except Exception:
-        pass  # ~/.codex config missing/unreadable → keep the sane Bedrock defaults above
+        pass  # no/unreadable config -> codex defaults (OpenAI provider, the user's login)
     os.makedirs(home, exist_ok=True)
-    text = (
-        f'model_provider = "{d["provider"]}"\n'
-        'forced_login_method = "api"\n'
-        "check_for_update_on_startup = false\n"
-        'commit_attribution = ""\n'
-        f'chatgpt_base_url = "{d["base_url"]}"\n'
-        f'model_reasoning_effort = "{d["effort"]}"\n'
-        f'model = "{d["model"]}"\n\n'
-        '[shell_environment_policy]\ninherit = "all"\n\n'
-        "[feedback]\nenabled = false\n\n"
-        "[analytics]\nenabled = false\n\n"
-        f'[model_providers.{d["provider"]}.aws]\n'
-        f'region = "{d["region"]}"\nprofile = "{d["profile"]}"\n'
-    )
+    lines = ["check_for_update_on_startup = false", 'commit_attribution = ""']
+    if cfg.get("model"):
+        lines.append(f'model = "{cfg["model"]}"')
+    if cfg.get("model_reasoning_effort"):
+        lines.append(f'model_reasoning_effort = "{cfg["model_reasoning_effort"]}"')
+    provider = cfg.get("model_provider")
+    tail = ['[shell_environment_policy]\ninherit = "all"', "[feedback]\nenabled = false",
+            "[analytics]\nenabled = false"]
+    if provider and provider != "openai":
+        lines += [f'model_provider = "{provider}"', 'forced_login_method = "api"']
+        if cfg.get("chatgpt_base_url"):
+            lines.append(f'chatgpt_base_url = "{cfg["chatgpt_base_url"]}"')
+        pblock = (cfg.get("model_providers") or {}).get(provider) or {}
+        aws = pblock.get("aws") or {}
+        if aws:
+            tail.append(f"[model_providers.{provider}.aws]\n"
+                        + "\n".join(f'{k} = "{v}"' for k, v in aws.items() if isinstance(v, str)))
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
-        fh.write(text)
+        fh.write("\n".join(lines) + "\n\n" + "\n\n".join(tail) + "\n")
+    # reuse the user's login (ChatGPT sign-in or stored API key); a symlink keeps token
+    # refreshes shared with the user's normal codex
+    auth_src, auth_dst = os.path.join(src, "auth.json"), os.path.join(home, "auth.json")
+    if os.path.exists(auth_src) and not os.path.lexists(auth_dst):
+        try:
+            os.symlink(auth_src, auth_dst)
+        except OSError:
+            pass
     return home
 
 
