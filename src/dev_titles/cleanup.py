@@ -263,6 +263,8 @@ def normalize_en_spelling(text: str) -> str:
     if _APPSTORE_BRANDS:
         brands = "|".join(re.escape(b) for b in _APPSTORE_BRANDS)
         text = re.sub(rf"\b({brands})\s+App\s+[Ss]tore\b", r"\1 Appstore", text)
+    # Dotted names broken by a caption line: 'React. js' -> 'React.js'
+    text = re.sub(r"\b([A-Za-z][A-Za-z0-9]*)\.\s+(js|ts|jsx|tsx|io)\b", r"\1.\2", text)
     return text
 
 

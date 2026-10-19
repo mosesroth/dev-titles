@@ -255,7 +255,11 @@ def _break_cjk(text: str, spec: LangSpec, keep_together=()) -> list[str]:
             # (then it splits BETWEEN whole tokens, e.g. a long identifier list).
             safe = [b for b in cand if not _interior_of_run(b, prot)]
             cand = safe or cand
-            cut = max(cand) if cand else fit  # fit = forced (single word > cap)
+            # Choose the break a subtitler would: at a sentence end, else a clause boundary,
+            # else the fullest line — and, when the rest fits on one more line, balanced lines.
+            # (Greedy max-fill broke mid-phrase and stranded sentence ends mid-line; that was
+            # most of a native reviewer's hand edits in a real review batch.)
+            cut = max(cand, key=lambda b: _cut_score(text, start, b, spec)) if cand else fit
             # Never cut inside a Latin token (a tokenizer may split code
             # identifiers like performMountingInstructions / Systrace.capture into
             # sub-morphemes and offer a boundary mid-identifier). Snap back to the
@@ -298,6 +302,47 @@ def _break_cjk(text: str, spec: LangSpec, keep_together=()) -> list[str]:
                 start += 1
         return [ln for ln in lines if ln]
     return _break_cjk_heuristic(text, spec, keep_together)
+
+
+_SENT_MARKS = set("。！？!?")
+_CLAUSE_MARKS = set("、，,；;：:")
+
+
+def _latin(ch: str) -> bool:
+    return bool(ch) and ch.isascii() and ch.isalnum()
+
+
+def boundary_kind(text: str, b: int, lang: str) -> int:
+    """2 = sentence boundary, 1 = clause boundary, 0 = neither, for a break at index `b`.
+    House punctuation: ja writes 。 as a full-width space and 、 as a half-width space; zh writes
+    a mid-line sentence break as a half-width space. A space between two Latin words
+    ("React Native") is never a boundary."""
+    prev = text[b - 1] if b > 0 else ""
+    nxt = text[b] if b < len(text) else ""
+    if b >= len(text) or prev in _SENT_MARKS or "　" in (prev, nxt):
+        return 2
+    if " " in (prev, nxt):
+        j = b - 1 if prev == " " else b
+        left = text[j - 1] if j > 0 else ""
+        right = text[j + 1] if j + 1 < len(text) else ""
+        if _latin(left) and _latin(right):
+            return 0
+        return 2 if lang.startswith("zh") else 1
+    if prev in _CLAUSE_MARKS:
+        return 1
+    return 0
+
+
+def _cut_score(text: str, start: int, b: int, spec: LangSpec) -> float:
+    w1 = display_width(text[start:b], cjk=True)
+    fill = w1 / spec.max_cpl
+    score = fill + {2: 0.6, 1: 0.35, 0: 0.0}[boundary_kind(text, b, spec.lang)]
+    if fill < 0.45:
+        score -= 1.0  # no stubby lines
+    w2 = display_width(text[b:].strip(" 　"), cjk=True)
+    if w2 <= spec.max_cpl:  # the rest fits on one more line: prefer balanced lines
+        score -= 0.5 * abs(w1 - w2) / spec.max_cpl
+    return score
 
 
 def _break_cjk_heuristic(text: str, spec: LangSpec, keep_together=()) -> list[str]:

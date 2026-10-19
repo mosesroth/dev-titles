@@ -21,7 +21,7 @@ from typing import Sequence
 
 from .config import LangSpec
 from .model import Cue, Subtitle
-from .segment.cjk import wrap_lines
+from .segment.cjk import boundary_kind, wrap_lines
 from .textwidth import display_width
 
 _SENT_END = tuple(".!?。！？…")
@@ -41,7 +41,15 @@ class Sentence:
 # before such a dot ("...from skills.sh." collapsed to "sh."), losing whole
 # clauses before translation — an omission the coverage gate couldn't catch
 # because the content never reached the translator.
-_SENT_SPLIT = re.compile(r"(?<=[.!?。！？…])\s+")
+# A sentence never starts with a lowercase word: "React. js developer" / "DNA. inc, …" are one
+# name broken by the caption line, not two sentences.
+_SENT_SPLIT = re.compile(r"(?<=[.!?。！？…])\s+(?![a-z])")
+# Dotted names the source captions break across a line: React.|js -> React.js
+_DOTTED = re.compile(r"\b([A-Za-z][A-Za-z0-9]*)\.\s+(js|ts|jsx|tsx|io)\b")
+
+
+def join_dotted_names(text: str) -> str:
+    return _DOTTED.sub(r"\1.\2", text)
 
 
 def _split_into_sentences(text: str, start: float, end: float) -> list[Sentence]:
@@ -75,19 +83,23 @@ def merge_en_to_sentences(en: Subtitle) -> list[Sentence]:
     buf: list[str] = []
     start: float | None = None
     last_end: float = 0.0
-    for c in en.cues:
-        txt = re.sub(r"\s+", " ", " ".join(c.lines)).strip()
-        if not txt or txt == "_":
-            continue
+    content = [
+        (c, t)
+        for c in en.cues
+        if (t := re.sub(r"\s+", " ", " ".join(c.lines)).strip()) and t != "_"
+    ]
+    for k, (c, txt) in enumerate(content):
         if start is None:
             start = c.start
         buf.append(txt)
         last_end = c.end
-        if txt.endswith(_SENT_END):
-            sents += _split_into_sentences(" ".join(buf).strip(), start, last_end)
+        nxt = content[k + 1][1] if k + 1 < len(content) else ""
+        # a cue ending in '.' continues if the next cue starts lowercase ("React." | "js developer")
+        if txt.endswith(_SENT_END) and not nxt[:1].islower():
+            sents += _split_into_sentences(join_dotted_names(" ".join(buf).strip()), start, last_end)
             buf, start = [], None
     if buf and start is not None:
-        sents += _split_into_sentences(" ".join(buf).strip(), start, last_end)
+        sents += _split_into_sentences(join_dotted_names(" ".join(buf).strip()), start, last_end)
     return sents
 
 
@@ -361,6 +373,56 @@ def free_segment_default() -> bool:
     return os.environ.get("SUBTITLE_FREE_SEGMENT", "1") != "0"
 
 
+COMFORT_DUR = 3.0  # a one-line subtitle needs ~3 s to read; two lines ~6 s (native reviewer, 2026-10)
+MERGE_MAX_GAP = 1.0  # only merge sentences spoken close together
+
+
+def merge_short_sentences(sents, texts, spec: LangSpec):
+    """[(start, end, text)] with SHORT adjacent sentences combined into one subtitle when the
+    result still fits on max_lines (no content is cut). A short sentence ('はい', 'いいですね')
+    otherwise flashes as its own cue; reviewers merge them by hand ('DMを送ります　凄いですね⏎
+    素晴らしいアプリです　いいですね'). Latin-script languages are left as they are."""
+    items = []
+    for s_, t in zip(sents, texts):
+        t = re.sub(r"\s+", " ", (t or "")).strip()
+        if t:
+            items.append([s_.start, s_.end, t])
+    if not spec.cjk or not items:
+        return [tuple(x) for x in items]
+    sep = "　" if spec.lang == "ja" else " "
+    cap = (spec.max_lines or 2) * spec.max_cpl
+    out = [items[0]]
+    for st, en_, t in items[1:]:
+        p = out[-1]
+        joined = p[2] + sep + t
+        short = (p[1] - p[0]) < COMFORT_DUR or (en_ - st) < COMFORT_DUR
+        fits = display_width(joined, True) <= cap * 0.95 and len(wrap_lines(joined, spec)) <= (spec.max_lines or 2)
+        if short and fits and st - p[1] <= MERGE_MAX_GAP and en_ - p[0] <= spec.max_dur:
+            out[-1] = [p[0], en_, joined]
+        else:
+            out.append([st, en_, t])
+    return [tuple(x) for x in out]
+
+
+def linger_into_gaps(cues: list[Cue], spec: LangSpec) -> list[Cue]:
+    """Keep a short subtitle on screen into the silence after it, up to COMFORT_DUR per line
+    (3 s one line, 6 s two lines), never past the next cue (minus the minimum gap) or max_dur.
+    Independent timing allows it, and it changes no text."""
+    if not cues:
+        return cues
+    min_gap = spec.min_gap_frames / spec.fps
+    out = list(cues)
+    for i, c in enumerate(out):
+        want = COMFORT_DUR * max(1, len([ln for ln in c.lines if ln.strip()]))
+        if c.duration >= want:
+            continue
+        limit = out[i + 1].start - min_gap if i + 1 < len(out) else c.start + want
+        new_end = min(c.start + want, c.start + spec.max_dur, max(limit, c.end))
+        if new_end > c.end:
+            out[i] = Cue(start=c.start, end=new_end, lines=c.lines)
+    return out
+
+
 def build_target_cues(
     en: Subtitle,
     sents: list["Sentence"],
@@ -387,15 +449,14 @@ def build_target_cues(
             en, sents, cjk_texts, spec, keep_together=keep_together, reflow=reflow
         )
     cues: list[Cue] = []
-    for sent, cjk in zip(sents, cjk_texts):
-        txt = re.sub(r"\s+", " ", (cjk or "")).strip()
-        if not txt:
-            continue
-        cues += resegment_translation(txt, sent.start, sent.end, spec, keep_together)
+    for st, en_, txt in merge_short_sentences(sents, cjk_texts, spec):
+        cues += resegment_translation(txt, st, en_, spec, keep_together)
     # resegment_translation enforces min_dur WITHIN a sentence but can't reach across sentence
     # boundaries, so a short sentence leaves a sub-min_dur cue. With independent timing we can
     # fix it globally: extend the short cue into the following silence, then merge if adjacent.
     cues = enforce_min_dur(cues, spec)
+    if spec.cjk:
+        cues = linger_into_gaps(cues, spec)
     cues = snap_gaps(cues, spec)
     # Cap display at max_dur — a sentence over a long/paused speech window (or a within-sentence
     # merge) can leave a cue longer than max_dur; trim the END (trailing silence is fine with
@@ -542,6 +603,44 @@ def snap_gaps(cues: list[Cue], spec: LangSpec) -> list[Cue]:
     return out
 
 
+def _line_end_kinds(text: str, lines: list[str], lang: str) -> list[int]:
+    """For each wrapped line, the boundary kind (2 sentence / 1 clause / 0) at its end in `text`."""
+    kinds, pos = [], 0
+    for ln in lines:
+        i = text.find(ln, pos)
+        if i < 0:  # wrap_lines trimmed edge punctuation; fall back to a prefix search
+            i = text.find(ln[: max(1, len(ln) // 2)], pos)
+        end = (i + len(ln)) if i >= 0 else pos + len(ln)
+        kinds.append(boundary_kind(text, min(end, len(text)), lang))
+        pos = max(end, pos)
+    return kinds
+
+
+def _pack_lines(text: str, lines: list[str], spec: LangSpec) -> list[list[str]]:
+    """Group wrapped lines into cues of <= max_lines, preferring cue ends at sentence ends
+    (then clause ends), and as few cues as possible. Fixed pairs of lines stranded a sentence
+    end mid-cue with a fragment of the next sentence ('…ありませんしかし / これまで…')."""
+    max_lines = spec.max_lines or 2
+    kinds = _line_end_kinds(text, lines, spec.lang)
+    n = len(lines)
+    end_cost = {2: 0.0, 1: 0.6, 0: 1.2}
+    best = [0.0] + [float("inf")] * n
+    back = [0] * (n + 1)
+    for j in range(1, n + 1):
+        for k in range(1, max_lines + 1):
+            i = j - k
+            if i < 0:
+                break
+            c = best[i] + 1.0 + (0.0 if j == n else end_cost[kinds[j - 1]])
+            if c < best[j]:
+                best[j], back[j] = c, i
+    groups, j = [], n
+    while j > 0:
+        groups.append(lines[back[j] : j])
+        j = back[j]
+    return groups[::-1]
+
+
 def resegment_translation(
     text: str, start: float, end: float, spec: LangSpec, keep_together=()
 ) -> list[Cue]:
@@ -555,7 +654,9 @@ def resegment_translation(
     if not lines:
         return []
     max_lines = spec.max_lines or 2
-    groups = [lines[i : i + max_lines] for i in range(0, len(lines), max_lines)]
+    groups = _pack_lines(text, lines, spec) if spec.cjk else [
+        lines[i : i + max_lines] for i in range(0, len(lines), max_lines)
+    ]
     widths = [max(sum(display_width(ln, spec.cjk) for ln in g), 0.5) for g in groups]
     total = sum(widths)
     span = max(end - start, 0.0)

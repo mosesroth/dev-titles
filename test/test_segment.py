@@ -1,3 +1,4 @@
+import re
 """Split from test_core: segment tests (25)."""
 
 from dev_titles.config import spec_for
@@ -158,8 +159,12 @@ def test_wrap_lines_preserves_characters():
     for lang in ["ja", "zh-Hans"]:
         spec = spec_for(lang)
         for txt in cases:
-            joined = "".join(wrap_lines(txt, spec)).replace(" ", "")
-            assert joined == txt.replace(" ", ""), (lang, txt, joined)
+            lines = wrap_lines(txt, spec)
+            joined, want = "".join(lines).replace(" ", ""), txt.replace(" ", "")
+            if lang.startswith("zh"):  # CN SG: a line-edge ，、； is dropped (the break is the pause)
+                assert not any(ln.endswith(("，", "、", "；")) for ln in lines), lines
+                joined, want = re.sub("[，、；]", "", joined), re.sub("[，、；]", "", want)
+            assert joined == want, (lang, txt, joined)
 
 
 def test_kinsoku_swap_does_not_split_latin_word():
@@ -402,3 +407,43 @@ def test_zh_myriad_numbers_interior_question_and_quotes():
     assert n("这是AI部门，对吧我们也一样") == "这是AI部门，对吧？我们也一样"
     assert n('点击"Run and Debug"面板') == "点击“Run and Debug”面板"
     assert n("我们走吧") == "我们走吧"
+
+
+def test_en_sentences_keep_dotted_names_and_lowercase_continuations():
+    """'React.' | 'js developer' (a caption line break inside React.js) is one sentence, not two."""
+    from dev_titles.model import Cue, Subtitle
+    from dev_titles.resegment import merge_en_to_sentences
+
+    en = Subtitle("en", [
+        Cue(0, 2, ["And then also as a React."]),
+        Cue(2, 4, ["js developer, you're used to it."]),
+        Cue(4, 6, ["Yes, my company is DNA."]),
+        Cue(6, 8, ["inc, a short intro. Next one."]),
+    ])
+    texts = [s.text for s in merge_en_to_sentences(en)]
+    assert texts == ["And then also as a React.js developer, you're used to it.",
+                     "Yes, my company is DNA. inc, a short intro.", "Next one."]
+
+
+def test_cjk_breaks_prefer_sentence_ends_and_merge_short_sentences():
+    """Lines/cues break at sentence ends (not greedy fill), and short adjacent sentences share a
+    subtitle when they fit (a native reviewer merged 'DMを送ります / 凄いですね / …' by hand)."""
+    from dev_titles.config import spec_for
+    from dev_titles.model import Cue, Subtitle
+    from dev_titles.resegment import build_target_cues, merge_en_to_sentences
+    from dev_titles.segment import wrap_lines
+
+    ja = spec_for("ja")
+    from dev_titles.resegment import resegment_translation
+
+    txt = "両者は密接に結合しているべきではありません　しかしこれまでの動画ライブラリは"
+    assert wrap_lines(txt, ja)[:2] == ["両者は密接に", "結合しているべきではありません"]
+    first = resegment_translation(txt, 0.0, 6.0, ja)[0]
+    assert first.lines[-1].endswith("ありません"), first.lines  # the cue ends with the sentence
+    en = Subtitle("en", [Cue(0.0, 1.2, ["I'll DM you."]), Cue(1.2, 2.0, ["Amazing."]),
+                         Cue(2.0, 3.4, ["Great app."]), Cue(3.4, 4.2, ["Nice."])])
+    sents = merge_en_to_sentences(en)
+    cues = build_target_cues(en, sents, ["DMを送ります", "凄いですね", "素晴らしいアプリです", "いいですね"],
+                             ja, free_segment=True)
+    assert len(cues) <= 2 and all(len(c.lines) <= 2 for c in cues), [c.lines for c in cues]
+    assert "".join("".join(c.lines) for c in cues).replace("　", "") == "DMを送ります凄いですね素晴らしいアプリですいいですね"
