@@ -515,12 +515,13 @@ def apply_kinsoku(lines: list[str], spec: LangSpec | None = None) -> list[str]:
                     # whole trailing Latin word down (never split it); else do a
                     # single-char swap only when the last char isn't a wordchar.
                     k = len(cur)
-                    while k > 0 and _is_wordchar(cur[k - 1]):
+                    word = _is_katakana if cur and _is_katakana(cur[-1]) else _is_wordchar
+                    while k > 0 and word(cur[k - 1]):  # whole trailing Latin OR katakana word
                         k -= 1
                     if 0 < k < len(cur):
                         lines[i], lines[i + 1] = cur[:k].rstrip(), cur[k:] + nxt
                         changed = True
-                    elif len(cur) > 1 and not _is_wordchar(cur[-1]):
+                    elif len(cur) > 1 and not _is_wordchar(cur[-1]) and not _is_katakana(cur[-1]):
                         # push cur's last char down (oidashi) — ORDER PRESERVED;
                         # the forbidden punct is no longer at the line start.
                         # (The old cur[:-1]+nxt[0], cur[-1]+nxt[1:] form reordered
