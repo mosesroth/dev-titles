@@ -568,7 +568,7 @@ def renderings_to_terms(renderings: dict, skip_sources=(), curated_renderings=No
             if " " not in src.strip() and any(
                 a.strip().lower() == src.strip().lower() for a in (spec or {}).get("avoid", [])
             ):
-                continue  # legacy single-word Wikipedia entity pin (Rally -> ラリー, Emerson ->
+                continue  # legacy single-word Wikipedia entity pin (Rally -> ラリー, Jordan ->
                 # エマーソン): the lookup now skips single words; ignore ones already in vocab.json
             # DROP dangerous avoid-forms: a SINGLE-char CJK form is almost always a
             # substring of unrelated words, so normalizing it corrupts text (a live run
@@ -854,8 +854,8 @@ def match_registry_names(
     low, ctx = text.lower(), (first_name_context or "").lower()
     fulls = [n for n in registry if len(n.split()) >= 2]
     # Uniqueness is measured among FULL names only: a bare first-name-only registry entry
-    # ('Emerson') must NOT block the full canonical ('Emerson Sklar') from resolving via its
-    # first name — that redundant entry is what left the mangled 'Emerson Spahr' uncorrected.
+    # ('Jordan') must NOT block the full canonical ('Jordan Avery') from resolving via its
+    # first name — that redundant entry is what left the mangled 'Jordan Avers' uncorrected.
     full_first_counts = Counter(n.split()[0].lower() for n in fulls)
     hits: set[str] = set()
     for name in registry:
@@ -868,7 +868,7 @@ def match_registry_names(
             # First-name hook: surface the full canonical when its first name appears and is
             # UNIQUE among full registry names and not a common word. An uncommon first name
             # >=4 chars is reliable in the TRANSCRIPT too (not just the description), so a
-            # MANGLED SURNAME ('Emerson Spahr' <- registry 'Emerson Sklar', which can't whole-
+            # MANGLED SURNAME ('Jordan Avers' <- registry 'Jordan Avery', which can't whole-
             # word match) still resolves to the canonical for ASR correction; shorter/ambiguous
             # first names stay description-only (avoid transcript 'will'/'mark' noise).
             if first not in _COMMON_WORD_NAMES and full_first_counts[first] == 1:

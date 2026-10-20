@@ -447,3 +447,25 @@ def test_cjk_breaks_prefer_sentence_ends_and_merge_short_sentences():
                              ja, free_segment=True)
     assert len(cues) <= 2 and all(len(c.lines) <= 2 for c in cues), [c.lines for c in cues]
     assert "".join("".join(c.lines) for c in cues).replace("　", "") == "DMを送ります凄いですね素晴らしいアプリですいいですね"
+
+
+def test_en_layout_rejoins_dotted_name_split_across_cues():
+    from dev_titles.model import Cue, Subtitle
+    from dev_titles.resegment import normalize_en_layout
+
+    sub = Subtitle("en", [Cue(0, 3, ["the other one", "is that as a React."]),
+                          Cue(3, 6, ["js developer, you're used", "to everything in React."])])
+    out = normalize_en_layout(sub).cues
+    assert out[0].lines[-1].endswith("React.js") and out[1].lines[0].startswith("developer")
+    assert out[1].lines[-1].endswith("in React.")  # a real sentence end is left alone
+
+
+def test_cjk_short_year_and_stray_english_hint():
+    from dev_titles.editor import deterministic_hints
+    from dev_titles.segment.cjk import normalize_ja_punct, normalize_zh_punct
+
+    assert normalize_ja_punct("'24年に受賞しました").startswith("24年")
+    assert "’" not in normalize_zh_punct("在’24年获奖")
+    assert any("LLM" in h for h in deterministic_hints("届けられます LLM", "ja", "to more people."))
+    assert not deterministic_hints("Apple TVで動きます", "ja", "It runs on Apple TV.")
+    assert not deterministic_hints("LLMを使います", "ja", "We use LLMs.")

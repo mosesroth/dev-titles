@@ -602,6 +602,12 @@ def normalize_cjk_numbers(text: str) -> str:
 _KANJI_DIGIT = {k: i + 1 for i, k in enumerate("一二三四五六七八九")}
 
 
+def _short_year(text: str) -> str:
+    """English 2-digit-year apostrophe ('24 / ’24) has no place in CJK: '24年 -> 24年 (a native
+    native reviewer's correction)."""
+    return re.sub(r"[‘’'′](\d{2})(?=\s*年)", r"\1", text)
+
+
 def normalize_ja_punct(text: str) -> str:
     """Japanese YouTube-caption punctuation, per the JP subtitle style guide §(3) and confirmed by a
     native localization reviewer ("all of the past YouTube captions follow the rule"):
@@ -616,6 +622,7 @@ def normalize_ja_punct(text: str) -> str:
     # writes "nextFocusUp、nextFocusDown"); replace it with a space so the
     # identifiers don't fuse into "nextFocusUpnextFocusDown".
     text = re.sub(r"(?<=[0-9A-Za-z])[、。](?=[0-9A-Za-z])", " ", text)
+    text = _short_year(text)
     # Clear questions lose ？; exclamations lose ！ (ASCII '!' only when not part of code like !==).
     text = re.sub(r"(か|かな|っけ)[？?]", r"\1。", text)
     text = text.replace("！", "。")
@@ -658,6 +665,7 @@ def normalize_zh_punct(text: str, at_cue_boundary: bool = True) -> str:
     ASCII ellipsis to U+2026. Doubled terminal punctuation is left for the
     validator to flag (it may indicate a real translation issue)."""
     text = text.replace("...", "…")
+    text = _short_year(text)
     # House register (formal AND conversational, per the native-reviewer verdict):
     # informal 你 -> 您. The model slips into 你 for possessives (你的应用) despite the prompt
     # directive — prose instruction under-delivers, so enforce deterministically.

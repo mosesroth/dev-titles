@@ -500,6 +500,31 @@ def _move_dangling_open_brackets(cues: list[Cue]) -> list[Cue]:
     return cues
 
 
+_DOT_END = re.compile(r"\b[A-Za-z][A-Za-z0-9]*\.$")
+_DOT_SUFFIX = re.compile(r"^(js|ts|jsx|tsx|io)\b")
+
+
+def _rejoin_dotted_across_cues(cues: list[Cue]) -> list[Cue]:
+    """Source captions break 'React.js' at a line/cue edge ('…a React.' | 'js developer…'): pull the
+    suffix back so the name reads whole ('…a React.js' | 'developer…')."""
+    flat = [[ln for ln in c.lines] for c in cues]
+    for i, lines in enumerate(flat):
+        for k in range(len(lines)):
+            # next line: same cue, or the first line of the next cue
+            if k + 1 < len(lines):
+                ni, nk = i, k + 1
+            elif i + 1 < len(flat) and flat[i + 1]:
+                ni, nk = i + 1, 0
+            else:
+                continue
+            cur, nxt = lines[k].rstrip(), flat[ni][nk].lstrip()
+            m = _DOT_SUFFIX.match(nxt)
+            if _DOT_END.search(cur) and m:
+                lines[k] = cur + m.group(1)
+                flat[ni][nk] = nxt[m.end():].lstrip()
+    return [Cue(c.start, c.end, [ln for ln in fl if ln.strip()] or [""]) for c, fl in zip(cues, flat)]
+
+
 def normalize_en_layout(sub: Subtitle) -> Subtitle:
     """Guarantee the EN deliverable meets its layout spec. EN corrections (ASR run-recovery, the
     auto-caption cross-check, the editorial en_autofix) write a fixed cue back as ONE unwrapped
@@ -511,7 +536,7 @@ def normalize_en_layout(sub: Subtitle) -> Subtitle:
 
     spec = spec_for(sub.language or "en")
     out: list[Cue] = []
-    for c in sub.cues:
+    for c in _rejoin_dotted_across_cues(sub.cues):
         bad = len(c.lines) > (spec.max_lines or 2) or any(
             display_width(ln, cjk=spec.cjk) > spec.max_cpl for ln in c.lines
         )

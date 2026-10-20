@@ -80,6 +80,15 @@ def from_llm(sents, invoke, brief="", chunk=40) -> list[str]:
     return labels
 
 
+def _canonical(labels):
+    """One spelling per person: 'Host (host)' / 'Host' / 'host' -> the most common full form."""
+    key = lambda x: re.sub(r"\s*\(.*?\)", "", x).strip().lower()
+    best = {}
+    for k, form in ((key(x), x) for x in labels if x):
+        best.setdefault(k, Counter())[form] += 1
+    return [best[key(x)].most_common(1)[0][0] if x else x for x in labels]
+
+
 def label_speakers(sents, invoke=None, cache_path=None, brief="", raw_path=None, logger=print) -> list[str]:
     """One speaker label per sentence, or [] when there is only one speaker (or nothing to go on)."""
     if not sents:
@@ -104,6 +113,7 @@ def label_speakers(sents, invoke=None, cache_path=None, brief="", raw_path=None,
         labels, source = from_asr(sents, words), "ASR diarization"
     elif invoke is not None:
         labels, source = from_llm(sents, invoke, brief), "LLM"
+    labels = _canonical(labels)
     if len({x for x in labels if x}) < 2:
         labels = []  # one speaker: nothing to tell the translator
     if p:

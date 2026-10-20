@@ -84,10 +84,10 @@ def _toks(s, rx):
     return Counter(rx.findall(s or ""))
 
 
-def guard_ok(old: str, new: str, max_growth: float = 1.15) -> bool:
+def guard_ok(old: str, new: str, max_growth: float = 1.15, slack: int = 3) -> bool:
     if not new or not new.strip():
         return False
-    if len(re.sub(r"\s", "", new)) > max(len(re.sub(r"\s", "", old)) * max_growth, len(old) + 3):
+    if len(re.sub(r"\s", "", new)) > max(len(re.sub(r"\s", "", old)) * max_growth, len(old) + slack):
         return False
     for rx in (_LATIN, _NUM):
         if _toks(old, rx) - _toks(new, rx):
@@ -112,7 +112,7 @@ def _examples_block(examples, L):
     return f"\nEdits native {L} reviewers made to earlier machine drafts (learn the KIND of fix, don't copy):\n{lines}\n"
 
 
-def deterministic_hints(txt: str, lang: str) -> list[str]:
+def deterministic_hints(txt: str, lang: str, src: str = "") -> list[str]:
     """Cheap flags fed to the editor (and fixed when safe): unbalanced quotes, run-ons."""
     hints = []
     if txt.count("“") != txt.count("”") or txt.count("「") != txt.count("」"):
@@ -121,6 +121,12 @@ def deterministic_hints(txt: str, lang: str) -> list[str]:
         hints.append("long run without punctuation")
     if lang == "ja" and re.search(r"[ぁ-んァ-ヶ一-龯ー]{40,}", txt):
         hints.append("long run without a break")
+    if src:  # an English word in the line that the English sentence doesn't contain: a stray
+        # fragment (a reviewer deleted a dangling 'LLM' left at a line end)
+        low = src.lower()  # substring match: plurals (LLMs), compounds (website ⊃ web) are fine
+        stray = [w for w in _LATIN.findall(txt) if len(w) > 1 and w.lower().rstrip(".'’") not in low]
+        if stray:
+            hints.append("English word(s) not in the English line: " + ", ".join(dict.fromkeys(stray)))
     return hints
 
 
@@ -204,6 +210,53 @@ def rate_pairs(cands, lang_name, judges, seed=29) -> dict:
     return out
 
 
+def _gate(items, *, invoke, judge, lang_name, by_i, normalize, rng, stats, log, changed, ctx_fn=None,
+          slack=3):
+    """Accept editor suggestions [(rec, rewrite, issue)] in place through the measured gate: token/
+    number guard -> pairwise second judge (randomized, tie -> other-family tie-break) -> both judges
+    rate current vs suggested (no reference): VETO an accepted one either rates worse, RESCUE a
+    rejected one every judge rates better (gate benchmark 2026-10-18, scripts/gate_*.py)."""
+    cands, rejected = [], []
+    for r, new, issue in items:
+        if not new or new == r.txt:
+            continue
+        stats["flagged"] += 1
+        if not guard_ok(r.txt, new, slack=slack):
+            stats["guard"] += 1
+            continue
+        ctx = ctx_fn(r) if ctx_fn else " ".join(by_i[j].src for j in (r.i - 1, r.i + 1) if j in by_i)
+        try:
+            ok, why = _pairwise(judge, lang_name, r.src, ctx, r.txt, new, rng)
+            if not ok and why == "__tie__" and judge is not invoke:
+                ok, why = _pairwise(invoke, lang_name, r.src, ctx, r.txt, new, rng)
+                why = f"tie-break: {why}"
+        except Exception:
+            ok, why = False, "pairwise failed"
+        (cands if ok else rejected).append((r, normalize(new, r.src), issue, why))
+    judges = (invoke, judge) if judge is not invoke else (invoke,)
+    lv = rate_pairs(cands + rejected, lang_name, judges)
+    for passed, (r, new, issue, why) in [(True, c) for c in cands] + [(False, c) for c in rejected]:
+        pairs = lv.get(r.i, [])
+        if passed:
+            ok = not any(s_ > o for o, s_ in pairs)
+            if not ok:
+                stats["veto"] += 1
+                why = f"{why}; a judge rated it worse"
+        else:
+            ok = len(pairs) == len(judges) and all(s_ < o for o, s_ in pairs)
+            if ok:
+                stats["rescued"] += 1
+                why = f"{why}; rescued: every judge rated it better"
+            else:
+                stats["pair"] += 1
+        log.append({"i": r.i, "src": r.src, "before": r.txt, "after": new, "issue": issue,
+                    "why": why, "status": "accepted" if ok else "rejected"})
+        if ok:
+            r.txt = new
+            changed.add(r.i)
+            stats["accepted"] += 1
+
+
 def native_edit(
     records,
     invoke,
@@ -245,7 +298,7 @@ def native_edit(
         chunk = pending[k : k + batch]
         rows = []
         for n, r in enumerate(chunk, 1):
-            hints = deterministic_hints(r.txt, lang)
+            hints = deterministic_hints(r.txt, lang, r.src)
             who = f"[{speakers[r.i]}] " if speakers and r.i < len(speakers) and speakers[r.i] else ""
             rows.append(f"{n} | {who}{r.src} | {r.txt}" + (f" | {', '.join(hints)}" if hints else ""))
         prompt = EDIT_PROMPT.format(
@@ -263,58 +316,15 @@ def native_edit(
             logger(f"{lang}: native editor batch failed ({type(e).__name__}) — skipped")
             flags = []
         stats["reviewed"] += len(chunk)
-        cands, rejected = [], []
+        items = []
         for f in flags:
             try:
                 r = chunk[int(f.get("id")) - 1]
             except (TypeError, ValueError, IndexError):
                 continue
-            new = (f.get("rewrite") or "").strip()
-            if not new or new == r.txt:
-                continue
-            stats["flagged"] += 1
-            if not guard_ok(r.txt, new):
-                stats["guard"] += 1
-                continue
-            ctx = " ".join(by_i[j].src for j in (r.i - 1, r.i + 1) if j in by_i)
-            try:
-                ok, why = _pairwise(judge, lang_name, r.src, ctx, r.txt, new, rng)
-                if not ok and why == "__tie__" and judge is not invoke:
-                    # the second judge called it a tie (same meaning, neither better): ask the other
-                    # family for a tie-break instead of discarding a plausible improvement
-                    ok, why = _pairwise(invoke, lang_name, r.src, ctx, r.txt, new, rng)
-                    why = f"tie-break: {why}"
-            except Exception:
-                ok, why = False, "pairwise failed"
-            (cands if ok else rejected).append((r, normalize(new, r.src), f.get("issue", ""), why))
-        # Both judges rate current vs suggested line, reference-free (gate benchmark 2026-10-18,
-        # 4,282 ja / 1,737 zh sentences vs human reviews, scripts/gate_*.py):
-        #  - VETO a pairwise-accepted suggestion either judge rates worse: harmful edits ja 53->34,
-        #    zh 14->10, for 4% fewer improvements;
-        #  - RESCUE a pairwise-rejected one (incl. "meaning differs") that EVERY judge rates better:
-        #    ja 42 improved / 0 harmed, zh 17 / 2.
-        judges = (invoke, judge) if judge is not invoke else (invoke,)
-        lv = rate_pairs(cands + rejected, lang_name, judges)
-        for passed, (r, new, issue, why) in [(True, c) for c in cands] + [(False, c) for c in rejected]:
-            pairs = lv.get(r.i, [])
-            if passed:
-                ok = not any(s_ > o for o, s_ in pairs)
-                if not ok:
-                    stats["veto"] += 1
-                    why = f"{why}; a judge rated it worse"
-            else:
-                ok = len(pairs) == len(judges) and all(s_ < o for o, s_ in pairs)
-                if ok:
-                    stats["rescued"] += 1
-                    why = f"{why}; rescued: every judge rated it better"
-                else:
-                    stats["pair"] += 1
-            log.append({"i": r.i, "src": r.src, "before": r.txt, "after": new, "issue": issue,
-                        "why": why, "status": "accepted" if ok else "rejected"})
-            if ok:
-                r.txt = new
-                changed.add(r.i)
-                stats["accepted"] += 1
+            items.append((r, (f.get("rewrite") or "").strip(), f.get("issue", "")))
+        _gate(items, invoke=invoke, judge=judge, lang_name=lang_name, by_i=by_i, normalize=normalize,
+              rng=rng, stats=stats, log=log, changed=changed)
         logger(f"{lang}: native editor {min(k + batch, len(pending))}/{len(pending)} {stats}")
     for r in pending:
         state[_h(r.src)] = _h(r.txt)
@@ -323,6 +333,162 @@ def native_edit(
         lp = sp.with_name(sp.name.replace("editor_state", "editor_log"))
         old = json.loads(lp.read_text(encoding="utf-8")) if lp.exists() else []
         lp.write_text(json.dumps(old + log, ensure_ascii=False, indent=1), encoding="utf-8")
+    return changed
+
+
+REPLY_PROMPT = """You are a native {L} subtitle editor checking SPEAKER TURNS in an interview / talk. Each block
+shows the end of one person's turn, then (marked >>) the start of the next person's turn, with the
+current {L} subtitles.
+
+VIDEO BRIEF: {brief}
+
+For the >> lines only, flag a line whose {L} does not read as THAT person replying to what was just
+said, and give a minimal rewrite. Typical problems:
+- reciprocal thanks rendered as fresh thanks: after the host thanks the guest, "Thank you for having
+  me" / "Thanks for having me" is a reply (ja こちらこそ…ありがとうございました, zh 也谢谢您的邀请);
+- a one-word reaction used as a reply rendered literally: "Brilliant." / "Cheers." / "Great." / "Sure." /
+  "Absolutely." answering thanks or a request means thanks / agreement / of course, not the adjective
+  (ja 素晴らしいです for a reply "Brilliant." is wrong; ありがとうございます / ええ / もちろんです);
+- yes/no answers that contradict the question's polarity; agreement words (同感です / そうですね);
+- "you" meaning the other speaker rendered as the audience (皆さん / 大家), or the reverse;
+- a welcome or thank-you addressed to the guest rendered as addressed to viewers.
+Flag nothing else: lines that already read naturally as the reply stay as they are. Keep every fact,
+name and number; keep it short.
+{examples}
+{items}
+
+Return ONLY a JSON array, e.g. [{{"id": 57, "issue": "reply to host's thanks", "rewrite": "…"}}]; [] if all fine."""
+
+
+REPLY_PAIR_PROMPT = """An exchange from a developer video, with two {L} subtitle renderings of the LAST line.
+{exchange}
+LAST LINE ({who}): "{en}"
+A: {a}
+B: {b}
+Which is the better {L} subtitle for THIS person saying this line IN THIS EXCHANGE — conveying what they
+mean as a reply (thanks returned, agreement, an answer), to the right person, with no fact lost or
+invented? Translating a reply-word literally ("Brilliant." as 素晴らしい) is worse than its function
+in context. Answer ONLY JSON: {{"better": "A"|"B"|"tie", "why": "<max 12 words>"}}"""
+
+
+def _reply_accept(judges, lang_name, exchange, who, en, old, new, rng) -> tuple[bool, str]:
+    """Accept only if EVERY judge, seeing the exchange, prefers the rewrite (order randomized)."""
+    whys = []
+    for judge in judges:
+        swap = rng.random() < 0.5
+        a, b = (new, old) if swap else (old, new)
+        try:
+            out = judge(REPLY_PAIR_PROMPT.format(L=lang_name, exchange=exchange, who=who, en=en, a=a, b=b)) or ""
+            m = re.search(r"\{.*\}", out, re.S)
+            d = json.loads(m.group(0)) if m else {}
+        except Exception:
+            return False, "reply judge failed"
+        if d.get("better") != ("A" if swap else "B"):
+            return False, f"a judge kept the current line: {d.get('why', '')}"
+        whys.append(d.get("why", ""))
+    return True, "every judge prefers it as the reply: " + " / ".join(whys)
+
+
+def reply_edit(
+    records,
+    invoke,
+    lang,
+    lang_name,
+    speakers,
+    *,
+    normalize,
+    pair_judge=None,
+    brief="",
+    state_path=None,
+    logger=print,
+    window=2,
+    per_call=8,
+    seed=31,
+):
+    """Turn-boundary editor: at each speaker change, check that the new speaker's first lines read
+    as a reply to the previous speaker (こちらこそ for reciprocal thanks, a reply "Brilliant." is not
+    素晴らしい). Sentence-by-sentence translation and the general editor miss this (A/B 2026-10-20).
+    Suggestions go through the same measured gate as native_edit. Returns the set of changed indices."""
+    if not speakers:
+        return set()
+    recs = sorted(records, key=lambda r: r.i)
+    by_i = {r.i: r for r in recs}
+    turns = [i for i in range(1, len(speakers)) if speakers[i] and speakers[i] != speakers[i - 1] and i in by_i]
+    sp = Path(state_path) if state_path else None
+    state = json.loads(sp.read_text(encoding="utf-8")) if sp and sp.exists() else {}
+
+    def key(i):
+        return _h("|".join(by_i[j].src + "\x00" + by_i[j].txt for j in range(i - window, i + window) if j in by_i))
+
+    todo = [i for i in turns if state.get(str(i)) != key(i)]
+    if not todo:
+        return set()
+    judge = pair_judge or invoke
+    rng = random.Random(seed)
+    changed, log = set(), []
+    stats = {"reviewed": 0, "flagged": 0, "accepted": 0, "guard": 0, "pair": 0, "veto": 0, "rescued": 0}
+
+    def tag(j):
+        return f"[{speakers[j]}]" if j < len(speakers) and speakers[j] else ""
+
+    def ctx_fn(r):  # the exchange before the line, with who says what
+        return "\n".join(f"{tag(j)}: \"{by_i[j].src}\"" for j in range(r.i - window - 1, r.i) if j in by_i)
+
+    for k in range(0, len(todo), per_call):
+        part = todo[k : k + per_call]
+        blocks, allowed = [], {}
+        for n, i in enumerate(part, 1):
+            lines = [f"BLOCK {n}"]
+            for j in range(i - window, i + window):
+                if j not in by_i:
+                    continue
+                mark = ">> " if j >= i else "   "
+                lines.append(f"{mark}{tag(j)} (id {j}) EN: {by_i[j].src} | {lang_name}: {by_i[j].txt}")
+                if j >= i and speakers[j] == speakers[i]:
+                    allowed[j] = by_i[j]
+            blocks.append("\n".join(lines))
+        prompt = REPLY_PROMPT.format(L=lang_name, brief=brief or "(none)", examples="", items="\n\n".join(blocks))
+        try:
+            flags = _parse_json_array(invoke(prompt) or "")
+        except Exception as e:
+            logger(f"{lang}: reply check batch failed ({type(e).__name__}) — skipped")
+            flags = []
+        stats["reviewed"] += len(part)
+        judges = (invoke, judge) if judge is not invoke else (invoke,)
+        for f in flags:
+            try:
+                r = allowed[int(f.get("id"))]
+            except (TypeError, ValueError, KeyError):
+                continue
+            new = (f.get("rewrite") or "").strip()
+            if not new or new == r.txt:
+                continue
+            stats["flagged"] += 1
+            # a reply marker (こちらこそ / ええ / いいですね) adds a few characters
+            if not guard_ok(r.txt, new, slack=7):
+                stats["guard"] += 1
+                continue
+            # The general gate judges a line in isolation and calls a reply rendering ("Brilliant."
+            # -> ありがとうございます) a meaning change; here every judge sees the exchange.
+            ok, why = _reply_accept(judges, lang_name, ctx_fn(r), tag(r.i), r.src, r.txt, new, rng)
+            new = normalize(new, r.src)
+            log.append({"i": r.i, "src": r.src, "before": r.txt, "after": new,
+                        "issue": "reply: " + f.get("issue", ""), "why": why,
+                        "status": "accepted" if ok else "rejected"})
+            if ok:
+                r.txt = new
+                changed.add(r.i)
+                stats["accepted"] += 1
+            else:
+                stats["pair"] += 1
+    for i in todo:
+        state[str(i)] = key(i)
+    if sp:
+        sp.write_text(json.dumps(state), encoding="utf-8")
+        lp = sp.with_name(sp.name.replace("reply_state", "editor_log"))
+        old = json.loads(lp.read_text(encoding="utf-8")) if lp.exists() else []
+        lp.write_text(json.dumps(old + log, ensure_ascii=False, indent=1), encoding="utf-8")
+    logger(f"{lang}: reply check over {len(todo)} speaker turns {stats}")
     return changed
 
 

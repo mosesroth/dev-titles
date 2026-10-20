@@ -63,3 +63,35 @@ def test_short_sentences_never_merge_across_speakers():
     same = merge_short_sentences(s, ["凄い", "どうも", "はい"], ja, ["A", "A", "A"])
     turns = merge_short_sentences(s, ["凄い", "どうも", "はい"], ja, ["A", "B", "B"])
     assert len(same) == 1 and len(turns) == 2
+
+
+def test_reply_edit_fixes_reply_only_when_every_judge_agrees(tmp_path):
+    """At a speaker change the reply check rewrites a literal reply ('Brilliant.' -> thanks) only
+    if every judge, seeing the exchange, prefers it; lines of the previous speaker are untouched."""
+    import json as _j
+
+    from dev_titles.editor import reply_edit
+    from dev_titles.localize import SentenceRecord
+
+    recs = [SentenceRecord("ja", 0, "Neil, thank you so much for joining us today.", "Neilさん 本日はありがとうございます", "", []),
+            SentenceRecord("ja", 1, "Brilliant.", "素晴らしいです", "", [])]
+    spk = ["Sam (host)", "Jane (guest)"]
+
+    def editor(p):
+        if "BLOCK 1" in p:
+            return _j.dumps([{"id": 1, "issue": "reply to thanks", "rewrite": "ありがとうございます"},
+                             {"id": 0, "issue": "x", "rewrite": "変更"}])  # id 0 is the other speaker
+        b_is_new = "B: ありがとうございます" in p
+        return _j.dumps({"better": "B" if b_is_new else "A"})
+
+    changed = reply_edit(recs, editor, "ja", "Japanese", spk, normalize=lambda t, s=None: t,
+                         pair_judge=editor, state_path=tmp_path / "reply_state.ja.json", logger=lambda m: None)
+    assert changed == {1} and recs[1].txt == "ありがとうございます"
+    assert recs[0].txt == "Neilさん 本日はありがとうございます"
+    log = _j.loads((tmp_path / "editor_log.ja.json").read_text())
+    assert log[0]["status"] == "accepted" and log[0]["issue"].startswith("reply")
+    # a judge that keeps the current line blocks it
+    recs[1].txt = "素晴らしいです"
+    stubborn = lambda p: _j.dumps([{"id": 1, "rewrite": "ありがとうございます"}]) if "BLOCK 1" in p else _j.dumps({"better": "tie"})
+    assert reply_edit(recs, stubborn, "ja", "Japanese", spk, normalize=lambda t, s=None: t,
+                      pair_judge=stubborn, logger=lambda m: None) == set()

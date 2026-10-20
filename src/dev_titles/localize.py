@@ -1152,6 +1152,19 @@ def _localize_en_impl(
             if _ech:
                 _rewrite_cache(cache_path, lang, records)
                 logger(f"{lang}: native editor rewrote {len(_ech)} line(s)")
+            if (video_vocab or {}).get("speakers"):
+                from .editor import reply_edit
+
+                _rch = reply_edit(
+                    records, qe_invoke, lang, _LANG_NAME.get(lang, lang), video_vocab["speakers"],
+                    normalize=_normalizer(lang, conversational), pair_judge=qe_second_judge,
+                    brief=(video_vocab or {}).get("brief", ""),
+                    state_path=Path(cache_path).parent / f"reply_state.{lang}.json" if cache_path else None,
+                    logger=logger,
+                )
+                if _rch:
+                    _rewrite_cache(cache_path, lang, records)
+                    logger(f"{lang}: reply check rewrote {len(_rch)} line(s)")
         # AUTOMATIC INCREMENTAL RE-REVIEW: if a prior QE state exists for this out dir (a
         # previous --qe-judge run), re-judge ONLY the segments whose translation changed since
         # then and reuse the stored panel for the rest — a cheap, correct refresh of the full
