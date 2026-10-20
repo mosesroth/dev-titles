@@ -1115,6 +1115,7 @@ def _localize_en_impl(
                 logger=logger,
                 budgets=_budgets,
                 triggers=_triggers,
+                min_width=_spec.max_cpl,
             )
             if _chg:
                 _rewrite_cache(cache_path, lang, records)

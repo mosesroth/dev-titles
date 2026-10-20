@@ -83,8 +83,8 @@ def ensure_clean_codex_home(home: str = JUDGE_HOME, src_home: str = "~/.codex") 
     return home
 
 
-def _default_runner(argv: list[str], prompt: str, timeout: float, out_path: str) -> str:
-    subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=timeout, check=False)
+def _default_runner(argv: list[str], prompt: str, timeout: float, out_path: str, env=None) -> str:
+    subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=timeout, check=False, env=env)
     with open(out_path, encoding="utf-8") as fh:
         return fh.read()
 
@@ -119,17 +119,14 @@ class CodexCliJudge:
     def invoke(self, prompt: str) -> str:
         fd, out_path = tempfile.mkstemp(suffix=".codex.txt")
         os.close(fd)
-        prev = os.environ.get("CODEX_HOME")
         try:
-            if self.codex_home:
-                os.environ["CODEX_HOME"] = self.codex_home  # lean config: no mcp/plugins
+            if self.codex_home and self._runner is _default_runner:
+                # lean config (no mcp/plugins), passed per call so parallel judges can't race on
+                # a process-wide os.environ change
+                env = {**os.environ, "CODEX_HOME": self.codex_home}
+                return _default_runner(self._argv(out_path), prompt, self.timeout, out_path, env=env).strip()
             return self._runner(self._argv(out_path), prompt, self.timeout, out_path).strip()
         finally:
-            if self.codex_home:
-                if prev is None:
-                    os.environ.pop("CODEX_HOME", None)
-                else:
-                    os.environ["CODEX_HOME"] = prev
             try:
                 os.unlink(out_path)
             except OSError:

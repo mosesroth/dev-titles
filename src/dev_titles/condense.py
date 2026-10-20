@@ -35,7 +35,12 @@ in the time it is on screen. Make the SMALLEST edit that brings it within its bu
 - drop redundant restatements and pronouns that are obvious from context; merge clauses;
 - KEEP every substantive fact, claim, step, condition, name, product/technical term and number.
 - KEEP the speaker's greeting and self-introduction (こんにちは…です), sign-offs, thanks and calls to
-  action ("check out…", "try…", "let us know…"): they are content, not filler.
+  action ("check out…", "try…", "let us know…"): they are content, not filler. A thank-you keeps what
+  it is for (ご参加いただき / お時間をいただき / ご紹介), and a welcome keeps 本日は…お迎えしました.
+- KEEP the politeness of every predicate: です・ます endings, honorific / humble forms (いただく, 伺う,
+  お迎えする); a polite question stays a full polite question (〜ありますか, not 〜は？ or 〜か).
+- KEEP who / whose when it says whose thing it is (弊社は, 私たちの, あなたの, 御社の) and time words that
+  carry the point (今こそ, 本日は).
 - Every line stays a complete, grammatical sentence with a natural predicate. Never cut a request or
   closing down to a fragment ending in へ/に/を/で, and never drop the subject a predicate needs
   (「…など多数です」 is broken; 「…などに対応しています」 is fine). Keep polite request forms
@@ -185,6 +190,7 @@ def condense_lang(
     examples=None,
     budgets=None,
     triggers=None,
+    min_width=0,
 ):
     """Production entry point (in A/B testing: ~12% shorter, matching reviewers; DQF flat-to-up).
     IDEMPOTENT: a sidecar <state_path> maps src-hash -> condensed-text-hash, so a re-run (which
@@ -200,6 +206,14 @@ def condense_lang(
     sp = _P(state_path) if state_path else None
     state = _json.loads(sp.read_text(encoding="utf-8")) if sp and sp.exists() else {}
     pending = [r for r in records if state.get(_h(r.src)) != _h(r.txt)]
+    # A ONE-LINE sentence is never condensed: it gets reading time from merging with its neighbours
+    # and lingering into silence, while trimming it can only cut politeness or thanks (benchmark
+    # 2026-10-20 vs a native reviewer's published tracks: half the condensed lines, half the
+    # important losses, 72% of the reading-speed gain kept).
+    if min_width:
+        from .textwidth import display_width as _dw
+
+        pending = [r for r in pending if _dw(re.sub(r"\s", "", r.txt), True) > min_width]
     # READING-SPEED GATE (all content types): only lines that cannot be read in their time on screen
     # are condensed — budget = limit x speech window. A slow tutorial line is left exactly as
     # translated; a dense interview line is fitted to its budget. No genre detection needed.
