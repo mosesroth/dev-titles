@@ -365,7 +365,8 @@ def _save_raw(transcript, path) -> None:
     _P(path).write_text(
         json.dumps(
             [
-                {"text": w.text, "start": w.start, "end": w.end, "confidence": w.confidence}
+                {"text": w.text, "start": w.start, "end": w.end, "confidence": w.confidence,
+                 **({"speaker": w.speaker} if getattr(w, "speaker", None) else {})}
                 for w in transcript.words
             ]
         ),

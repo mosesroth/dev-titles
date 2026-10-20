@@ -15,6 +15,18 @@ python3 -c "import bandit" 2>/dev/null || {
     echo "pre-push: bandit is not installed (pip install bandit) — refusing to push unscanned." >&2
     exit 1
 }
+# Private-name guard: this is a public repo. If a private term list exists OUTSIDE the repo
+# (one term per line), refuse to push files containing any of them.
+private="${DEV_TITLES_PRIVATE_TERMS:-$HOME/.config/dev-titles/private-terms.txt}"
+if [ -f "$private" ]; then
+    hits=$(grep -rIniw --exclude-dir=.git --exclude-dir=__pycache__ --exclude-dir=build \
+        -F -f "$private" -- . 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "pre-push: private terms found — remove them before pushing:" >&2
+        echo "$hits" | head -20 >&2
+        exit 1
+    fi
+fi
 echo "pre-push: tests…"
 PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider -o addopts="" test >/dev/null 2>&1 || {
     echo "pre-push: tests FAILED — run: PYTHONPATH=src python3 -m pytest test" >&2

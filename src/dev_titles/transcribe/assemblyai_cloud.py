@@ -150,6 +150,7 @@ def _to_transcript(payload: dict, language: str = "en") -> Transcript:
                 start=float(w["start"]) / 1000.0,
                 end=float(w["end"]) / 1000.0,
                 confidence=w.get("confidence"),
+                speaker=w.get("speaker"),
             )
         )
     return Transcript(language=language, words=words)

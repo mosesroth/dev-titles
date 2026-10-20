@@ -253,6 +253,19 @@ def _with_brief(transcript: str, video_vocab: dict | None) -> str:
     return f"VIDEO BRIEF: {brief}\n\nTRANSCRIPT: {transcript}" if brief else transcript
 
 
+def _speakers_for(sents, video_vocab) -> list[str]:
+    """Per-sentence speaker labels (video_vocab['speakers'], from speakers.label_speakers) when
+    they match this sentence list, else [] (single speaker / unknown)."""
+    sp = (video_vocab or {}).get("speakers") or []
+    return list(sp) if len(sp) == len(sents) else []
+
+
+def _ctx_for(sents, video_vocab) -> str:
+    from .speakers import labeled_transcript
+
+    return _with_brief(labeled_transcript(sents, _speakers_for(sents, video_vocab)), video_vocab)
+
+
 def keep_latin_terms(glossary, video_vocab, lang: str = "") -> list[str]:
     """SINGLE source of truth for 'keep this Latin' (DNT) terms, unified across EVERY source
     so none is a separate crack (a term slipping through one source while masked by another). Collects:
@@ -504,7 +517,9 @@ def translate_subtitle(
         cf = p.open("a", encoding="utf-8")
 
     sents = merge_en_to_sentences(en)
-    ctx = _with_brief(" ".join(s.text for s in sents), video_vocab)
+    ctx = _ctx_for(sents, video_vocab)
+    _spk = _speakers_for(sents, video_vocab)
+    from .speakers import speaker_note
     logger(f"{lang}: {len(en.cues)} EN cues -> {len(sents)} sentences")
     cues: list = []
     issues: list[EnforcementIssue] = []
@@ -573,12 +588,13 @@ def translate_subtitle(
             last_exc: Exception | None = None
             for _attempt in range(3):
                 try:
+                    _ctx_i = ctx + speaker_note(i, _spk)
                     txt, iss = translate_segment(
                         translator,
                         g,
                         s.text,
                         lang,
-                        full_context=ctx,
+                        full_context=_ctx_i,
                         reflect=True,
                         char_budget=budget,
                         exemplar_bank=exemplar_bank,
@@ -591,7 +607,7 @@ def translate_subtitle(
                         lang,
                         txt,
                         iss,
-                        ctx,
+                        _ctx_i,
                         budget,
                         exemplar_bank,
                         extra_dnt,
@@ -652,7 +668,7 @@ def translate_subtitle(
     # during the 1:1 migration — see resegment.free_segment_default), else strict 1:1 EN-cue
     # alignment (legacy: one target cue per EN cue, same timestamps).
     cjk_texts = [r.txt for r in records]  # already normalized when built/cached
-    cues = build_target_cues(en, sents, cjk_texts, spec, keep_together=keep_together)
+    cues = build_target_cues(en, sents, cjk_texts, spec, keep_together=keep_together, speakers=_spk)
     sub = Subtitle(lang, cues).renumber()
     rep = validity_report(sub, conversational)
     logger(
@@ -773,7 +789,7 @@ def _lang_setup(
         t.translations.get(lang) for t in g.terms if t.translations.get(lang)
     ] + extra_dnt
     sents = merge_en_to_sentences(en)
-    ctx = _with_brief(" ".join(s.text for s in sents), video_vocab)
+    ctx = _ctx_for(sents, video_vocab)
     return spec, g, extra_dnt, keep_together, sents, ctx
 
 
@@ -817,12 +833,15 @@ def make_retranslate(
                 "\nLOCAL CONTEXT (for disambiguation only — do NOT translate these, only the "
                 f"line above): [previous] {prev!r}  [next] {nxt!r}"
             )
+        from .speakers import speaker_note
+
+        _ctx_i = ctx + speaker_note(rec.i, _speakers_for(sents, video_vocab))
         txt, iss = translate_segment(
             translator,
             g,
             s.text,
             lang,
-            full_context=ctx,
+            full_context=_ctx_i,
             reflect=True,
             char_budget=budget,
             exemplar_bank=exemplar_bank,
@@ -882,7 +901,10 @@ def _subtitle_from_records(
     else:
         reflow = None
 
-    cues = build_target_cues(en, sents, cjk_texts, spec, keep_together=keep_together, reflow=reflow)
+    cues = build_target_cues(
+        en, sents, cjk_texts, spec, keep_together=keep_together, reflow=reflow,
+        speakers=_speakers_for(sents, video_vocab),
+    )
     if rc_path is not None and rc:
         rc_path.write_text(json.dumps(rc, ensure_ascii=False), encoding="utf-8")
     return Subtitle(lang, cues).renumber()
@@ -1018,6 +1040,20 @@ def _localize_en_impl(
         if _brief:
             video_vocab = {**(video_vocab or {}), "brief": _brief}
             logger(f"video brief: {_brief[:160]}…")
+        # who says each sentence (interviews): ASR diarization if saved, else one LLM pass
+        from .speakers import label_speakers
+
+        try:
+            _spk_all = label_speakers(
+                merge_en_to_sentences(en), qe_invoke,
+                (_od / "speakers.json") if _od else None, brief=_brief or "",
+                raw_path=(_od / "raw.json") if _od else None, logger=logger,
+            )
+        except Exception as e:  # never sink a run on speaker labeling
+            logger(f"speaker labeling skipped ({type(e).__name__})")
+            _spk_all = []
+        if _spk_all:
+            video_vocab = {**(video_vocab or {}), "speakers": _spk_all}
     for lang in langs:
         bank = (
             exemplar_bank_for(lang)
@@ -1110,6 +1146,7 @@ def _localize_en_impl(
                 brief=(video_vocab or {}).get("brief", ""),
                 register=str(_reg)[:300],
                 glossary_terms=_terms,
+                speakers=(video_vocab or {}).get("speakers") or None,
                 logger=logger,
             )
             if _ech:

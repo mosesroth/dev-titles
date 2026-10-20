@@ -39,6 +39,9 @@ Flag ONLY lines a native viewer would notice as machine-made or wrong:
 - unnatural or coined word choices, odd terms, wrong register (keep the house register: {register});
 - awkward word order, run-on sentences, list items without separators;
 - a meaning misread in context (tech-industry jargon, tag questions like "…, right?", negation, sarcasm);
+- the wrong SPEAKER or addressee: when the English is tagged [speaker], a reply or reaction from
+  the other person must read as theirs ("Thank you for having me" from a guest -> ja こちらこそ…,
+  zh 也谢谢您的邀请), and "you" said to one guest is that person, not the audience;
 - stray or unbalanced quotation marks, leftover characters;
 - the AUDIENCE addressed as a single person: when the speaker talks to viewers / the room
   ("Are you interested in…?"), zh uses 大家 (not 您), ja uses 皆さん;
@@ -216,6 +219,7 @@ def native_edit(
     logger=print,
     batch=6,
     seed=17,
+    speakers=None,
 ):
     """Run the native-editor pass over SentenceRecords in place. Returns the set of changed indices."""
     sp = Path(state_path) if state_path else None
@@ -242,7 +246,8 @@ def native_edit(
         rows = []
         for n, r in enumerate(chunk, 1):
             hints = deterministic_hints(r.txt, lang)
-            rows.append(f"{n} | {r.src} | {r.txt}" + (f" | {', '.join(hints)}" if hints else ""))
+            who = f"[{speakers[r.i]}] " if speakers and r.i < len(speakers) and speakers[r.i] else ""
+            rows.append(f"{n} | {who}{r.src} | {r.txt}" + (f" | {', '.join(hints)}" if hints else ""))
         prompt = EDIT_PROMPT.format(
             L=lang_name,
             brief=brief or "(none)",

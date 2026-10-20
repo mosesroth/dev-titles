@@ -377,31 +377,33 @@ COMFORT_DUR = 3.0  # a one-line subtitle needs ~3 s to read; two lines ~6 s (nat
 MERGE_MAX_GAP = 1.0  # only merge sentences spoken close together
 
 
-def merge_short_sentences(sents, texts, spec: LangSpec):
+def merge_short_sentences(sents, texts, spec: LangSpec, speakers=None):
     """[(start, end, text)] with SHORT adjacent sentences combined into one subtitle when the
     result still fits on max_lines (no content is cut). A short sentence ('はい', 'いいですね')
     otherwise flashes as its own cue; reviewers merge them by hand ('DMを送ります　凄いですね⏎
     素晴らしいアプリです　いいですね'). Latin-script languages are left as they are."""
+    spk = list(speakers) if speakers and len(speakers) == len(sents) else [""] * len(sents)
     items = []
-    for s_, t in zip(sents, texts):
+    for s_, t, who in zip(sents, texts, spk):
         t = re.sub(r"\s+", " ", (t or "")).strip()
         if t:
-            items.append([s_.start, s_.end, t])
+            items.append([s_.start, s_.end, t, who])
     if not spec.cjk or not items:
-        return [tuple(x) for x in items]
+        return [tuple(x[:3]) for x in items]
     sep = "　" if spec.lang == "ja" else " "
     cap = (spec.max_lines or 2) * spec.max_cpl
     out = [items[0]]
-    for st, en_, t in items[1:]:
+    for st, en_, t, who in items[1:]:
         p = out[-1]
         joined = p[2] + sep + t
         short = (p[1] - p[0]) < COMFORT_DUR or (en_ - st) < COMFORT_DUR
         fits = display_width(joined, True) <= cap * 0.95 and len(wrap_lines(joined, spec)) <= (spec.max_lines or 2)
-        if short and fits and st - p[1] <= MERGE_MAX_GAP and en_ - p[0] <= spec.max_dur:
-            out[-1] = [p[0], en_, joined]
+        same = who == p[3]  # never put two speakers in one subtitle
+        if same and short and fits and st - p[1] <= MERGE_MAX_GAP and en_ - p[0] <= spec.max_dur:
+            out[-1] = [p[0], en_, joined, who]
         else:
-            out.append([st, en_, t])
-    return [tuple(x) for x in out]
+            out.append([st, en_, t, who])
+    return [tuple(x[:3]) for x in out]
 
 
 def linger_into_gaps(cues: list[Cue], spec: LangSpec) -> list[Cue]:
@@ -431,6 +433,7 @@ def build_target_cues(
     keep_together=(),
     reflow=None,
     free_segment: bool | None = None,
+    speakers=None,
 ) -> list[Cue]:
     """Build the shipping target cues from per-sentence translations.
 
@@ -449,7 +452,7 @@ def build_target_cues(
             en, sents, cjk_texts, spec, keep_together=keep_together, reflow=reflow
         )
     cues: list[Cue] = []
-    for st, en_, txt in merge_short_sentences(sents, cjk_texts, spec):
+    for st, en_, txt in merge_short_sentences(sents, cjk_texts, spec, speakers):
         cues += resegment_translation(txt, st, en_, spec, keep_together)
     # resegment_translation enforces min_dur WITHIN a sentence but can't reach across sentence
     # boundaries, so a short sentence leaves a sub-min_dur cue. With independent timing we can

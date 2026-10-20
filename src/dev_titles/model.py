@@ -14,6 +14,7 @@ class Word:
     start: float
     end: float
     confidence: Optional[float] = None
+    speaker: Optional[str] = None  # ASR diarization label, when the engine provides one
 
 
 @dataclass

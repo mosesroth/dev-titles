@@ -29,19 +29,31 @@ from dev_titles.textwidth import display_width
 from dev_titles.validate.rules import validity_report
 
 
-def join_lines(lines):
-    """Latin-aware join: a line break between two ASCII alphanumerics was a word separator."""
+def _is_kata(ch):
+    return "\u30a0" <= ch <= "\u30ff"
+
+
+_JA_SENT_END = re.compile(r"(です|ます|ました|でした|ません|ましょう|ですね|ますね|ですか|ますか|ください|か|ね|よ)$")
+
+
+def join_lines(lines, lang="ja"):
+    """Join a reviewed cue's lines for re-wrapping without losing the reviewer's break. A line
+    break between two ASCII alphanumerics was a word separator. In ja, reviewers often end a
+    sentence with a line break instead of 。 (…こともできます⏎React Nativeの…): keep it as a
+    full-width space after a sentence-final form, else a half-width (clause) space, so the
+    re-wrap can break there instead of welding the sentences ('こともできますReact|Native')."""
     out = ""
     for p in (ln.strip() for ln in lines):
-        if (
-            out
-            and p
-            and out[-1].isascii()
-            and out[-1].isalnum()
-            and p[0].isascii()
-            and p[0].isalnum()
-        ):
-            out += " "
+        if out and p:
+            if out[-1].isascii() and out[-1].isalnum() and p[0].isascii() and p[0].isalnum():
+                out += " "
+            elif (
+                lang == "ja"
+                and out[-1] not in " 　・「『（(“"
+                and p[0] not in " 　・」』）)”、。"
+                and not (_is_kata(out[-1]) and _is_kata(p[0]))  # one loanword broken by the line
+            ):
+                out += "　" if _JA_SENT_END.search(out) else " "
         out += p
     return out
 
@@ -102,7 +114,7 @@ def glossary_audit(sub, lang, glossary_path="glossary/glossary.yaml"):
         for form in t.all_source_forms:
             if not form.isascii():
                 continue
-            # whole Latin run, not part of a URL / file name (example.com/Store, App.js, minisim.app)
+            # whole Latin run, not part of a URL / file name (ring.com/Appstore, App.js, minisim.app)
             # and not a parenthetical gloss right after the canonical (アプリ内課金（IAP）)
             pat = (
                 rf"(?<![A-Za-z0-9./（(])(?<![A-Za-z0-9][ -]){re.escape(form)}"
@@ -131,7 +143,7 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     for f in sorted(Path(a.src).glob("*.srt")):
-        # '<Video>.ja_Reviewed.srt', '<Video>.ja_Reviewed_<date>.srt', '<Video>_Reviewed.ja_….srt'
+        # '<Video>.ja_Reviewed.srt', '<Video>.ja_Reviewed_20261002.srt', '<Video>_Reviewed.ja_….srt'
         video, lang = re.split(r"[._]", f.name)[0], lang_of(f.name)
         if not lang:
             print(f"  SKIP {f.name}")
@@ -154,12 +166,15 @@ def main():
                 cues.append(Cue(c.start, c.end, lines))
                 continue
             fixed += 1
-            text = join_lines(lines)
+            text = join_lines(lines, spec.lang)
             wrapped = wrap_lines(text, spec)
             if len(wrapped) <= spec.max_lines:
                 cues.append(Cue(c.start, c.end, wrapped))
-            else:  # too much text for one cue: BALANCED split across the cue's own window
-                cues += balanced_split(text, c.start, c.end, spec)
+            else:  # too much text for one cue: split it within its own window with the house
+                # segmenter (breaks at sentence/clause ends, never inside a Latin name)
+                cues += resegment_translation(text, c.start, c.end, spec) or balanced_split(
+                    text, c.start, c.end, spec
+                )
         # Clamp OVERLAPS (a hand-edited timestamp running into the next cue): end the earlier cue
         # where the next one starts.
         for k in range(len(cues) - 1):
