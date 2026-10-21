@@ -73,6 +73,10 @@ layout rules, validation and the guards that keep the LLM honest.
    and at each speaker change a **reply check** fixes replies translated literally ("Brilliant."
    answering thanks is not 素晴らしい; "Thank you for having me" → こちらこそ…). A reply fix is
    accepted only if every judge, shown the exchange, prefers it.
+   **Names policy.** Partner company names use the partner's own official localized name where its
+   website brands itself that way, else stay in Latin; a product named with an ordinary word gets its
+   official rendering from the partner's site, else one consistent per-video choice. Each partner is
+   looked up once and locked in `glossary/partners.yaml` (edit by hand to correct).
 8. **Validation.** Every cue is checked against the language's rules (duration, gaps,
    lines, cps, cpl, punctuation). Errors block; warnings are flagged.
 9. **Review bundle.** You get the EN master, a VTT and an SRT for each language, and

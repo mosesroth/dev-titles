@@ -369,7 +369,9 @@ def http_fetch(url: str, timeout: int = 20) -> str:
     with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
         html = r.read().decode("utf-8", "ignore")
     html = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", html)
-    return re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", html)).strip()
+    import html as _html
+
+    return _html.unescape(re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", html))).strip()  # &amp; -> &
 
 
 def wikipedia_langlink_title(entity: str, lang_code: str, web_fetch) -> str | None:
