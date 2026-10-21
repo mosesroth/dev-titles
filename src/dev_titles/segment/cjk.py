@@ -172,6 +172,7 @@ def _word_break_positions(text: str, lang: str) -> set[int] | None:
         elif lang.startswith("zh"):
             import jieba
 
+            _zh_vocab(jieba)
             surfaces = list(jieba.cut(text))
         else:
             return None
@@ -195,6 +196,23 @@ def _word_break_positions(text: str, lang: str) -> set[int] | None:
 # the preceding content word (else 「ます」/particles get stranded on their own
 # line or cue, which a native reviewer flags immediately).
 _JA_CLITIC_POS = ("助詞", "助動詞", "接尾辞", "補助記号", "記号")
+
+
+# Tech words jieba's default dictionary splits (来自后|端系统): never break inside them.
+_ZH_WORDS = (
+    "后端 前端 全栈 智能体 提示词 可观测性 可扩展性 工作流 数据库 服务器 客户端 服务端 云端 端到端 "
+    "大模型 大语言模型 多模态 微服务 开源 代码库 代码审查 开发者 开发板 测试用例 部署 回滚 延迟 "
+    "并发 吞吐量 用户体验 用户界面 命令行 终端 插件 框架 组件 模块 接口 应用商店 设备端 电视端"
+).split()
+_ZH_READY = False
+
+
+def _zh_vocab(jieba) -> None:
+    global _ZH_READY
+    if not _ZH_READY:
+        for w in _ZH_WORDS:
+            jieba.add_word(w, freq=100000)
+        _ZH_READY = True
 
 
 def _ja_bunsetsu_positions(text: str, words) -> set[int] | None:
@@ -333,10 +351,15 @@ def boundary_kind(text: str, b: int, lang: str) -> int:
     return 0
 
 
+_ZH_NO_LINE_START = set("的得地了着过们吗呢吧啊么")
+
+
 def _cut_score(text: str, start: int, b: int, spec: LangSpec) -> float:
     w1 = display_width(text[start:b], cjk=True)
     fill = w1 / spec.max_cpl
     score = fill + {2: 0.6, 1: 0.35, 0: 0.0}[boundary_kind(text, b, spec.lang)]
+    if spec.lang.startswith("zh") and b < len(text) and text[b] in _ZH_NO_LINE_START:
+        score -= 1.5  # a zh line never starts with a particle (明年|的路线图)
     if fill < 0.45:
         score -= 1.0  # no stubby lines
     w2 = display_width(text[b:].strip(" 　"), cjk=True)

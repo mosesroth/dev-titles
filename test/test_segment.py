@@ -510,3 +510,14 @@ def test_en_sentence_start_capitalized_but_not_products():
     out = normalize_en_layout(Subtitle("en", [Cue(0, 2, ["a couple of seconds delay."]),
                                               Cue(2, 4, ["it's like, a lot"]), Cue(4, 6, ["tmux is a good way"])]))
     assert out.cues[1].lines[0].startswith("It's") and out.cues[2].lines[0].startswith("tmux")
+
+
+def test_zh_tech_words_and_particles_stay_attached():
+    from dev_titles.config import spec_for
+    from dev_titles.segment import wrap_lines
+
+    zh = spec_for("zh-Hans")
+    lines = wrap_lines("我们正在更深入地集成来自后端系统的数据和信息", zh)
+    assert not any(a.endswith("后") and b.startswith("端") for a, b in zip(lines, lines[1:])), lines
+    lines = wrap_lines("这个发现很有意思也促使我们开始思考明年的路线图该怎么规划", zh)
+    assert not any(ln.startswith(("的", "了", "们")) for ln in lines), lines
