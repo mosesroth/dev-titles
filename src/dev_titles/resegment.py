@@ -544,8 +544,66 @@ def normalize_en_layout(sub: Subtitle) -> Subtitle:
             out.append(c)
             continue
         text = re.sub(r"\s+", " ", " ".join(c.lines)).strip()
-        out += resegment_translation(text, c.start, c.end, spec) or [c]
+        text = re.sub(r"\s+([,.;:!?])", r"\1", text)  # no space before punctuation (', that…')
+        wrapped = (_balance2(text, spec) if not spec.cjk and (spec.max_lines or 2) == 2 else None) or wrap_lines(text, spec)
+        if len(wrapped) <= (spec.max_lines or 2):
+            out.append(Cue(c.start, c.end, wrapped))
+            continue
+        out += (_split_latin_cue(text, c.start, c.end, spec) if not spec.cjk else None) or (
+            resegment_translation(text, c.start, c.end, spec) or [c]
+        )
     return Subtitle(sub.language, snap_gaps(enforce_min_dur(out, spec), spec)).renumber()
+
+
+_WEAK_END = {"the", "a", "an", "to", "of", "in", "into", "on", "at", "for", "with", "and", "or", "but",
+             "that", "is", "are", "was", "be", "my", "your", "our", "their", "its", "i", "we", "you"}
+
+
+def _balance2(text: str, spec: LangSpec) -> list[str] | None:
+    """Two balanced display lines for Latin text (greedy fill left 'into the' alone on line 2):
+    the break nearest the middle, after punctuation if close, never after a weak word."""
+    if len(text) <= spec.max_cpl:
+        return [text]
+    best, best_score = None, None
+    for m in re.finditer(" ", text):
+        a, b = text[: m.start()], text[m.end():]
+        if len(a) > spec.max_cpl or len(b) > spec.max_cpl:
+            continue
+        score = -abs(len(a) - len(b)) / len(text) + (0.15 if a[-1] in ",.;:!?" else 0.0)
+        if a.split()[-1].lower() in _WEAK_END:
+            score -= 0.3
+        if best_score is None or score > best_score:
+            best, best_score = [a, b], score
+    return best
+
+
+def _split_latin_cue(text: str, start: float, end: float, spec: LangSpec) -> list[Cue] | None:
+    """Split an over-full Latin-script cue into TWO cues at the best word boundary: after sentence
+    or clause punctuation where possible, near the middle, never leaving a 1-2 word orphan
+    ('…you don't need' | 'it.') and never starting a cue with punctuation. Time is shared by
+    length. None if no two-way split fits (the caller falls back to the general re-segmenter)."""
+    words = text.split()
+    best, best_score = None, None
+    for k in range(3, len(words) - 2):
+        a, b = " ".join(words[:k]), " ".join(words[k:])
+        if b[:1] in ",.;:!?":
+            continue
+        la, lb = _balance2(a, spec), _balance2(b, spec)
+        if la is None or lb is None:
+            continue
+        if min(len(a), len(b)) < 0.3 * len(text):
+            continue  # no stub subtitle ('the task might be,' alone)
+        score = {".": 2.0, "?": 2.0, "!": 2.0, ",": 0.6, ";": 0.6, ":": 0.6}.get(a[-1], 0.0)
+        score -= abs(len(a) - len(b)) / max(len(text), 1)
+        if words[k - 1].lower() in _WEAK_END:
+            score -= 1.0  # never end a subtitle on 'the' / 'into' / 'and'…
+        if best_score is None or score > best_score:
+            best, best_score = (la, lb, len(a)), score
+    if best is None:
+        return None
+    la, lb, n = best
+    mid = start + (end - start) * n / max(len(text), 1)
+    return [Cue(start, mid, la), Cue(mid, end, lb)]
 
 
 def enforce_min_dur(cues: list[Cue], spec: LangSpec) -> list[Cue]:

@@ -311,6 +311,9 @@ def keep_latin_terms(glossary, video_vocab, lang: str = "") -> list[str]:
                 list(video_vocab.get("identifiers", []))
                 + list(video_vocab.get("terms", []))
                 + list(video_vocab.get("names", []))
+                # speakers' names from the speaker labels ('Moses (host)' -> 'Moses'): a host
+                # named only in the brief was auto-pinned to katakana (モーゼス) by the term-pin pass
+                + [re.sub(r"\s*\(.*?\)", "", x).strip() for x in set(video_vocab.get("speakers") or []) if x]
             )
             if not _glossary_translates(t)
         ]
