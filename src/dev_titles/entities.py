@@ -78,28 +78,32 @@ def names_policy(en_text: str, invoke, cache_path=None, brief: str = "") -> dict
 
 
 def apply_policy(video_vocab: dict | None, policy: dict, langs=("ja", "zh-Hans")) -> dict:
-    """Merge the policy into the per-video vocab: companies join the keep-Latin names and lose any
-    localized rendering; each ordinary-word product gets ONE rendering per language, replacing every
-    case variant ('concierge' / 'Concierge'). Returns a new dict."""
+    """Merge the policy into the per-video vocab, PER LANGUAGE:
+      - a company gets its OFFICIAL localized name where the partner has one
+        (policy['company_names'][company][lang]), else stays Latin (a keep-Latin rendering);
+        any other localized rendering of it is dropped;
+      - each ordinary-word product gets ONE rendering, replacing every case variant.
+    Returns a new dict."""
     vv = json.loads(json.dumps(video_vocab or {}))  # deep copy
     companies = policy.get("companies") or []
     products = policy.get("ordinary_products") or []
+    official = policy.get("company_names") or {}
     if not companies and not products:
         return vv
-    names = list(vv.get("names") or [])
-    vv["names"] = names + [c for c in companies if c not in names]
     rend = vv.setdefault("renderings", {})
-    comp_l = {c.lower() for c in companies}
     for lang in set(rend) | set(langs):
         r = rend.setdefault(lang, {})
-        for src in [s for s in r if s.lower() in comp_l]:
-            del r[src]  # a company name is never localized
+        for company in companies:
+            for src in [k for k in r if k.lower() == company.lower()]:
+                del r[src]
+            loc = ((official.get(company) or {}).get(lang) or "").strip()
+            r[company] = {"canonical": loc, "avoid": [company]} if loc else {"canonical": company}
         for prod in products:
             tgt = (prod.get(lang) or "").strip()
             if not tgt:
                 continue
             name = str(prod["name"]).strip()
-            for src in [s for s in r if s.lower() == name.lower()]:
+            for src in [k for k in r if k.lower() == name.lower()]:
                 del r[src]
             r[name] = {"canonical": tgt, "avoid": [name]}
     return vv
@@ -137,8 +141,9 @@ def save_partners(partners: dict, path=PARTNERS_PATH) -> None:
     import yaml
 
     head = ("# Partner product names with their OFFICIAL ja / zh-Hans renderings, found on the partner's own\n"
-            "# website by the pre-run names step (entities.official_rendering) and locked here. Company names\n"
-            "# themselves stay Latin. Edit by hand to correct; an entry here is never looked up again.\n")
+            "# website by the pre-run names step and locked here, with the source page. 'name' = the company's\n"
+            "# own localized name (null = none on its site -> Latin). Edit by hand to correct; an entry here is\n"
+            "# never looked up again.\n")
     Path(path).write_text(head + yaml.safe_dump({"partners": partners}, allow_unicode=True, sort_keys=True),
                           encoding="utf-8")
 
@@ -177,6 +182,51 @@ def official_rendering(company, product, lang, *, web_search, web_fetch, invoke,
     return None, None
 
 
+NAME = """This text is from {url}, a page on {company}'s own website in {L}. Does this page write the company's
+OWN name in a localized {L} form (not the Latin spelling "{company}")? Use ONLY this page. Answer ONLY JSON:
+{{"rendering": "<the localized company name exactly as written>" | null, "quote": "<the exact phrase from the
+page that contains it>"}}
+
+PAGE TEXT:
+{text}"""
+
+
+def official_company_name(company, lang, *, web_search, web_fetch, invoke, max_pages=3):
+    """(localized name, url) from the company's OWN site in `lang`, or (None, None)."""
+    hint, L, paths = _LANG_HINT[lang]
+    slug = _slug(company)
+    urls = []
+    for q in (f"{company} {hint}", f"{company} {'官网' if lang.startswith('zh') else '公式サイト'}"):
+        try:
+            urls += [u for u in web_search(q) if u not in urls]
+        except Exception:
+            continue
+    own = [u for u in urls if slug and slug[:12] in _slug(re.sub(r"^https?://([^/]+).*", r"\1", u))]
+    own.sort(key=lambda u: 0 if any(t in u.lower() for t in paths) else 1)
+    for u in own[:max_pages]:
+        try:
+            text = web_fetch(u)
+        except Exception:
+            continue
+        if not text or (lang == "ja" and not re.search(r"[ぁ-んァ-ン]", text)) or (
+            lang == "zh-Hans" and (not re.search(r"[一-鿿]", text) or re.search(r"[ぁ-ん]", text))
+        ):
+            continue
+        try:
+            m = re.search(r"\{.*\}", invoke(NAME.format(url=u, company=company, L=L, text=text[:12000])) or "", re.S)
+            d = json.loads(m.group(0)) if m else {}
+        except Exception:
+            d = {}
+        r, quote = (d.get("rendering") or "").strip(), (d.get("quote") or "").strip()
+        # the localized name must be how the site BRANDS itself, not a one-off reading guide:
+        # used at least as often as the Latin name on the page (e.g. Latin 23x vs a local reading 1x)
+        latin_n = len(re.findall(re.escape(company), text, re.I))
+        if (r and quote and r in quote and r.lower() != company.lower()
+                and re.sub(r"\s", "", quote) in re.sub(r"\s", "", text) and text.count(r) >= max(latin_n, 1)):
+            return r, u
+    return None, None
+
+
 def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-Hans"),
                      path=PARTNERS_PATH, logger=print) -> dict:
     """Replace the policy's model-chosen product renderings with LOCKED official ones: from
@@ -184,6 +234,22 @@ def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-
     official rendering keep the model's choice, marked unverified."""
     partners = load_partners(path)
     changed = False
+    names = policy.setdefault("company_names", {})
+    for company in policy.get("companies", []):
+        entry = partners.setdefault(company, {}).setdefault("name", {})
+        for lang in langs:
+            if lang in entry:  # locked, incl. "no localized name" (rendering None)
+                if (entry[lang] or {}).get("rendering"):
+                    names.setdefault(company, {})[lang] = entry[lang]["rendering"]
+                continue
+            r, url = official_company_name(company, lang, web_search=web_search, web_fetch=web_fetch,
+                                           invoke=invoke)
+            entry[lang] = {"rendering": r, "source": url} if r else {"rendering": None,
+                                                                    "source": "no localized name on own site"}
+            changed = True
+            if r:
+                names.setdefault(company, {})[lang] = r
+                logger(f"names policy: official {lang} name of {company} = {r} ({url}) — locked")
     for prod in policy.get("ordinary_products", []):
         company = (prod.get("company") or "").strip()
         name = str(prod["name"]).strip()
@@ -208,6 +274,8 @@ def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-
                 prod.setdefault("source", {})[lang] = "unverified (no official page found)"
         if not entry:
             del partners[company]["products"][name]
+        if not partners[company].get("products"):
+            partners[company].pop("products", None)
     if changed:
-        save_partners({k: v for k, v in partners.items() if v.get("products")}, path)
+        save_partners({k: v for k, v in partners.items() if v.get("products") or v.get("name")}, path)
     return policy
