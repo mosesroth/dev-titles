@@ -469,3 +469,44 @@ def test_cjk_short_year_and_stray_english_hint():
     assert any("LLM" in h for h in deterministic_hints("届けられます LLM", "ja", "to more people."))
     assert not deterministic_hints("Apple TVで動きます", "ja", "It runs on Apple TV.")
     assert not deterministic_hints("LLMを使います", "ja", "We use LLMs.")
+
+
+def test_kinsoku_never_splits_a_katakana_word():
+    """A line can't start with ・; when ・ can't be pulled up, move the whole katakana word down
+    (was: one char, 'サムネイ' | 'ル・')."""
+    from dev_titles.config import spec_for
+    from dev_titles.segment import wrap_lines
+
+    lines = wrap_lines("「サイズの都合上 アセット・サムネイル・プレビューは表示されません」", spec_for("ja"))
+    assert not any(a.endswith("サムネイ") for a in lines), lines
+    assert all(not ln.startswith("・") for ln in lines)
+
+
+def test_en_layout_split_has_no_orphans_or_leading_punctuation():
+    """Re-fitting an over-full EN cue: two balanced cues, no 1-2 word orphan, no cue starting with
+    punctuation, no line ending on 'the'/'into'."""
+    from dev_titles.model import Cue, Subtitle
+    from dev_titles.resegment import normalize_en_layout
+
+    sub = Subtitle("en", [Cue(0, 6, ["the task might be, and then it just fades into the background",
+                                     "when you don't need it. And another long tail here"]),
+                          Cue(6, 12, ["change how the team thinks about it. That's been an amazing thing with Orbit+ ,",
+                                      "that we're in the hands of millions and millions of users in the US, Canada,"])])
+    out = normalize_en_layout(sub).cues
+    assert all(len(c.lines) <= 2 and all(len(ln) <= 42 for ln in c.lines) for c in out)
+    assert all(len(" ".join(c.lines).split()) >= 3 for c in out)
+    assert not any(c.lines[0][:1] in ",.;:" for c in out)
+    assert not any(ln.split()[-1].lower() in ("the", "into", "and") for c in out for ln in c.lines)
+
+
+def test_en_sentence_start_capitalized_but_not_products():
+    from dev_titles.cleanup import capitalize_sentence_starts
+    from dev_titles.model import Cue, Subtitle
+    from dev_titles.resegment import normalize_en_layout
+
+    assert capitalize_sentence_starts("seconds delay. it's like,") == "seconds delay. It's like,"
+    assert capitalize_sentence_starts("the project. tmux is good") == "the project. tmux is good"
+    assert capitalize_sentence_starts("e.g. the app") == "e.g. the app"
+    out = normalize_en_layout(Subtitle("en", [Cue(0, 2, ["a couple of seconds delay."]),
+                                              Cue(2, 4, ["it's like, a lot"]), Cue(4, 6, ["tmux is a good way"])]))
+    assert out.cues[1].lines[0].startswith("It's") and out.cues[2].lines[0].startswith("tmux")

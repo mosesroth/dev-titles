@@ -42,12 +42,20 @@ layout rules, validation and the guards that keep the LLM honest.
    scores the output on a calibrated DQF scale. It then **auto-repairs** segments the
    judges flagged as major, and keeps a repair only if a re-score shows it is better.
 5. **CJK re-segmentation.** Cues are re-timed and re-broken for each language; English
-   line breaks are never reused. It enforces per-language cps/cpl limits, Japanese kinsoku
-   and phrase (bunsetsu) boundaries, Chinese full-width punctuation rules, and keeps
-   multi-word terms and glossary targets on one line and in one cue.
+   line breaks are never reused. Lines break at sentence ends, then clause ends, with balanced
+   lines; cues end at sentence ends; short neighbouring sentences share a subtitle when they
+   still fit two lines, and short cues stay on screen into the following silence (about 3 s a
+   line). Two speakers never share a subtitle. It enforces per-language cps/cpl limits,
+   Japanese kinsoku (moving a whole word, never splitting one) and phrase (bunsetsu)
+   boundaries, Chinese full-width punctuation rules, and keeps names and glossary targets on
+   one line and in one cue. `scripts/seg_eval.py` scores segmentation against a reviewer's
+   corrected tracks.
 6. **Japanese condensation.** Japanese has a much lower reading-speed budget than English.
-   Over-long Japanese lines are tightened the way a subtitle editor would. The pass is
-   guarded and can be turned off with `--no-condense`.
+   Only multi-line sentences faster than about 10 characters a second are tightened, the way a
+   subtitle editor would; one-line sentences get reading time from merging and lingering
+   instead, because trimming them only removes politeness. Names, numbers, thanks and
+   politeness are protected. Turn it off with `--no-condense`; measure it with
+   `scripts/condense_benchmark.py`.
 7. **Native-editor pass.** A reference-free native subtitle editor flags lines a native viewer
    would notice: literal idioms, odd terms, wrong register, run-ons, context misreads. It
    proposes a minimal rewrite for each. A rewrite lands only if:
@@ -59,6 +67,12 @@ layout rules, validation and the guards that keep the LLM honest.
    Measured against human-reviewed subtitles, that rescue was almost never wrong. QE repair
    later can't overwrite an editor rewrite unless both judges flag it as a major error.
    Turn the pass off with `--no-editor`.
+
+   **Speaker turns.** Who says each sentence comes from ASR diarization when the engine
+   provides it, else one LLM pass guided by the video brief. The translator sees the turns,
+   and at each speaker change a **reply check** fixes replies translated literally ("Brilliant."
+   answering thanks is not 素晴らしい; "Thank you for having me" → こちらこそ…). A reply fix is
+   accepted only if every judge, shown the exchange, prefers it.
 8. **Validation.** Every cue is checked against the language's rules (duration, gaps,
    lines, cps, cpl, punctuation). Errors block; warnings are flagged.
 9. **Review bundle.** You get the EN master, a VTT and an SRT for each language, and

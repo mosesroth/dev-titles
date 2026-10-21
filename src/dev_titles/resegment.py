@@ -525,6 +525,25 @@ def _rejoin_dotted_across_cues(cues: list[Cue]) -> list[Cue]:
     return [Cue(c.start, c.end, [ln for ln in fl if ln.strip()] or [""]) for c, fl in zip(cues, flat)]
 
 
+def _capitalize_across_cues(cues: list[Cue]) -> list[Cue]:
+    """A sentence that starts a cue after a cue ending in . ? ! gets a capital when its first word
+    is ordinary English ('…seconds delay.' | 'it's like,' -> 'It's like,'); see
+    cleanup.capitalize_sentence_starts for the word list and exceptions."""
+    from .cleanup import _ABBREV, _COMMON_START
+
+    out = list(cues)
+    for i in range(1, len(out)):
+        prev, cur = out[i - 1], out[i]
+        if not prev.lines or not cur.lines or not cur.lines[0]:
+            continue
+        last = prev.lines[-1].rstrip().split()[-1] if prev.lines[-1].strip() else ""
+        first = cur.lines[0].lstrip()
+        word = re.match(r"[a-z][a-z']*", first)
+        if last[-1:] in ".!?" and last.lower() not in _ABBREV and word and word.group(0) in _COMMON_START:
+            out[i] = Cue(cur.start, cur.end, [first[0].upper() + first[1:]] + list(cur.lines[1:]))
+    return out
+
+
 def normalize_en_layout(sub: Subtitle) -> Subtitle:
     """Guarantee the EN deliverable meets its layout spec. EN corrections (ASR run-recovery, the
     auto-caption cross-check, the editorial en_autofix) write a fixed cue back as ONE unwrapped
@@ -536,7 +555,7 @@ def normalize_en_layout(sub: Subtitle) -> Subtitle:
 
     spec = spec_for(sub.language or "en")
     out: list[Cue] = []
-    for c in _rejoin_dotted_across_cues(sub.cues):
+    for c in _capitalize_across_cues(_rejoin_dotted_across_cues(sub.cues)):
         bad = len(c.lines) > (spec.max_lines or 2) or any(
             display_width(ln, cjk=spec.cjk) > spec.max_cpl for ln in c.lines
         )
@@ -556,7 +575,10 @@ def normalize_en_layout(sub: Subtitle) -> Subtitle:
 
 
 _WEAK_END = {"the", "a", "an", "to", "of", "in", "into", "on", "at", "for", "with", "and", "or", "but",
-             "that", "is", "are", "was", "be", "my", "your", "our", "their", "its", "i", "we", "you"}
+             "that", "is", "are", "was", "be", "my", "your", "our", "their", "its", "i", "we", "you",
+             # words that lead into a noun phrase ('the same | API', 'a very | big')
+             "same", "other", "new", "own", "more", "most", "very", "this", "these", "those", "some",
+             "any", "all", "every", "each", "such", "really", "so", "as", "from", "by", "about"}
 
 
 def _balance2(text: str, spec: LangSpec) -> list[str] | None:

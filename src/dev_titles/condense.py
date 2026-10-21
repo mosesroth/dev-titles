@@ -41,6 +41,12 @@ in the time it is on screen. Make the SMALLEST edit that brings it within its bu
   お迎えする); a polite question stays a full polite question (〜ありますか, not 〜は？ or 〜か).
 - KEEP who / whose when it says whose thing it is (弊社は, 私たちの, あなたの, 御社の) and time words that
   carry the point (今こそ, 本日は).
+- KEEP who does what: never change the subject or agent (businesses recommending to each other is not
+  customers recommending), and never swap a specific term for a broader one (GitHub Discussions is not
+  議論; software is not 製品).
+- KEEP focus words that carry the point: だけ / のみ / も / さえ / just / only / also / even ("it just
+  needs to be a live app" must still say ONLY that), and the object of a verb (示せるのは… keeps what
+  is shown).
 - Every line stays a complete, grammatical sentence with a natural predicate. Never cut a request or
   closing down to a fragment ending in へ/に/を/で, and never drop the subject a predicate needs
   (「…など多数です」 is broken; 「…などに対応しています」 is fine). Keep polite request forms

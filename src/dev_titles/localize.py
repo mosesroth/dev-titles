@@ -77,7 +77,7 @@ def llm_serialize_lock(logger=_noop):
     except ImportError:  # Windows: no flock -> run unguarded
         yield
         return
-    path = os.path.expanduser("~/.dev_titles_llm.lock")
+    path = os.environ.get("DEV_TITLES_LLM_LOCK") or os.path.expanduser("~/.dev_titles_llm.lock")
     fh = None
     try:
         fh = open(path, "w")

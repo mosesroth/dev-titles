@@ -265,7 +265,32 @@ def normalize_en_spelling(text: str) -> str:
         text = re.sub(rf"\b({brands})\s+App\s+[Ss]tore\b", r"\1 Appstore", text)
     # Dotted names broken by a caption line: 'React. js' -> 'React.js'
     text = re.sub(r"\b([A-Za-z][A-Za-z0-9]*)\.\s+(js|ts|jsx|tsx|io)\b", r"\1.\2", text)
-    return text
+    return capitalize_sentence_starts(text)
+
+
+_COMMON_START = set(
+    "a an and but so or if when then there this that these those it it's its i i'm i've we we're "
+    "we've you you're they they're he she what why how where who which yes yeah no okay ok well now "
+    "making make let let's just also actually because maybe once after before in on at for with to "
+    "the our my your their all some one two three first next finally sure right great thanks thank "
+    "is are was were do does did can could will would should have has had not".split()
+)
+_ABBREV = {"e.g.", "i.e.", "etc.", "vs.", "approx.", "mr.", "ms.", "dr."}
+
+
+def capitalize_sentence_starts(text: str) -> str:
+    """Capitalize an ordinary English word that starts a sentence after '. ' / '? ' / '! '
+    ('…a couple of seconds delay. it's like,' -> 'It's like'). Only common words — a lowercase
+    product or command (tmux, raf.dev, sam build) is left alone, as is anything after an
+    abbreviation (e.g., etc.)."""
+
+    def repl(m):
+        prev, word = m.group(1), m.group(3)
+        if prev.lower() in _ABBREV or word.lower() not in _COMMON_START:
+            return m.group(0)
+        return f"{prev}{m.group(2)}{word[0].upper()}{word[1:]}"
+
+    return re.sub(r"(\S+[.!?])(\s+)([a-z][a-z']*)\b", repl, text)
 
 
 _SMALL = {
