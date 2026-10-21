@@ -39,7 +39,8 @@ List:
    form that only works as a modifier).
 Exclude: people's names; the channel owner's own products and brands (they follow the glossary);
 coined product names that are not ordinary words (e.g. Kubernetes, Figma) — those stay Latin.
-Return ONLY JSON: {{"companies": [...], "ordinary_products": [{{"name": "...", "ja": "...", "zh-Hans": "..."}}]}}"""
+Return ONLY JSON: {{"companies": [...], "ordinary_products": [{{"name": "...", "company": "<whose product>",
+"ja": "...", "zh-Hans": "..."}}]}}"""
 
 _OWN_BRANDS = re.compile(r"^$")  # set your own brands here; the glossary covers them otherwise
 
@@ -102,3 +103,111 @@ def apply_policy(video_vocab: dict | None, policy: dict, langs=("ja", "zh-Hans")
                 del r[src]
             r[name] = {"canonical": tgt, "avoid": [name]}
     return vv
+
+
+# ---- Official renderings from the partner's own website, locked in glossary/partners.yaml ----
+
+PARTNERS_PATH = "glossary/partners.yaml"
+_LANG_HINT = {"ja": ("日本語", "Japanese", ("/ja", "ja-jp", "/jp", "jp/", "ja_jp")),
+              "zh-Hans": ("中文", "Simplified Chinese", ("/zh", "zh-cn", "/cn", "cn/", "zh_cn", "zh-hans"))}
+FIND = """This text is from {url}, a page on {company}'s own website in {L}. How does this page write the
+{company} product called "{product}" in {L}? Use ONLY this page: if it does not mention that product,
+answer null. Answer ONLY JSON: {{"rendering": "<exactly as written on the page>" | null, "quote": "<the exact
+sentence or phrase from the page that contains it>"}}
+
+PAGE TEXT:
+{text}"""
+
+
+def _slug(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def load_partners(path=PARTNERS_PATH) -> dict:
+    import yaml
+
+    p = Path(path)
+    if not p.exists():
+        return {}
+    d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    return d.get("partners", {}) or {}
+
+
+def save_partners(partners: dict, path=PARTNERS_PATH) -> None:
+    import yaml
+
+    head = ("# Partner product names with their OFFICIAL ja / zh-Hans renderings, found on the partner's own\n"
+            "# website by the pre-run names step (entities.official_rendering) and locked here. Company names\n"
+            "# themselves stay Latin. Edit by hand to correct; an entry here is never looked up again.\n")
+    Path(path).write_text(head + yaml.safe_dump({"partners": partners}, allow_unicode=True, sort_keys=True),
+                          encoding="utf-8")
+
+
+def official_rendering(company, product, lang, *, web_search, web_fetch, invoke, max_pages=4):
+    """(rendering, url) from the company's OWN site in `lang`, or (None, None). A page counts only if its
+    domain contains the company's name, and the rendering only if the quoted text is really on the page."""
+    hint, L, paths = _LANG_HINT[lang]
+    slug = _slug(company)
+    urls = []
+    for q in (f'"{company}" "{product}" {hint}', f"{company} {product} {hint}", f"{company} {hint}"):
+        try:
+            urls += [u for u in web_search(q) if u not in urls]
+        except Exception:
+            continue
+    own = [u for u in urls if slug and slug[:12] in _slug(re.sub(r"^https?://([^/]+).*", r"\1", u))]
+    own.sort(key=lambda u: 0 if any(t in u.lower() for t in paths) else 1)
+    for u in own[:max_pages]:
+        try:
+            text = web_fetch(u)
+        except Exception:
+            continue
+        if not text or (lang == "ja" and not re.search(r"[ぁ-んァ-ン]", text)) or (
+            lang == "zh-Hans" and (not re.search(r"[一-鿿]", text) or re.search(r"[ぁ-ん]", text))
+        ):
+            continue  # not a page in that language
+        try:
+            m = re.search(r"\{.*\}", invoke(FIND.format(url=u, company=company, L=L, product=product,
+                                                       text=text[:12000])) or "", re.S)
+            d = json.loads(m.group(0)) if m else {}
+        except Exception:
+            d = {}
+        r, quote = (d.get("rendering") or "").strip(), (d.get("quote") or "").strip()
+        if r and quote and r in quote and re.sub(r"\s", "", quote) in re.sub(r"\s", "", text):
+            return r, u
+    return None, None
+
+
+def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-Hans"),
+                     path=PARTNERS_PATH, logger=print) -> dict:
+    """Replace the policy's model-chosen product renderings with LOCKED official ones: from
+    partners.yaml if known, else looked up on the partner's site and locked there. Products with no
+    official rendering keep the model's choice, marked unverified."""
+    partners = load_partners(path)
+    changed = False
+    for prod in policy.get("ordinary_products", []):
+        company = (prod.get("company") or "").strip()
+        name = str(prod["name"]).strip()
+        if not company:
+            continue
+        entry = partners.setdefault(company, {}).setdefault("products", {}).setdefault(name, {})
+        for lang in langs:
+            locked = entry.get(lang)
+            if isinstance(locked, dict) and locked.get("rendering"):
+                prod[lang] = locked["rendering"]
+                prod.setdefault("source", {})[lang] = locked.get("source", "partners.yaml")
+                continue
+            r, url = official_rendering(company, name, lang, web_search=web_search, web_fetch=web_fetch,
+                                        invoke=invoke)
+            if r:
+                prod[lang] = r
+                prod.setdefault("source", {})[lang] = url
+                entry[lang] = {"rendering": r, "source": url}
+                changed = True
+                logger(f"names policy: official {lang} rendering of {company} '{name}' = {r} ({url}) — locked")
+            else:
+                prod.setdefault("source", {})[lang] = "unverified (no official page found)"
+        if not entry:
+            del partners[company]["products"][name]
+    if changed:
+        save_partners({k: v for k, v in partners.items() if v.get("products")}, path)
+    return policy

@@ -1068,6 +1068,17 @@ def _localize_en_impl(
         except Exception as e:  # never sink a run on it
             logger(f"names policy skipped ({type(e).__name__})")
             _pol = {}
+        if _pol.get("ordinary_products"):
+            # prefer the partner's OWN official translation (looked up once, locked in partners.yaml)
+            try:
+                from .entities import resolve_official
+                from .search import web_search
+                from .vocab_prep import http_fetch
+
+                _pol = resolve_official(_pol, web_search=web_search, web_fetch=http_fetch,
+                                        invoke=qe_invoke, langs=langs, logger=logger)
+            except Exception as e:
+                logger(f"official-name lookup skipped ({type(e).__name__})")
         if _pol.get("companies") or _pol.get("ordinary_products"):
             video_vocab = apply_policy(video_vocab, _pol, langs)
             logger(
