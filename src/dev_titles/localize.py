@@ -1057,6 +1057,23 @@ def _localize_en_impl(
             _spk_all = []
         if _spk_all:
             video_vocab = {**(video_vocab or {}), "speakers": _spk_all}
+        # names policy: partner companies stay Latin; ordinary-word products get ONE rendering
+        from .entities import apply_policy, names_policy
+
+        try:
+            _pol = names_policy(
+                " ".join(c.text for c in en.cues), qe_invoke,
+                (_od / "entities.json") if _od else None, brief=_brief or "",
+            )
+        except Exception as e:  # never sink a run on it
+            logger(f"names policy skipped ({type(e).__name__})")
+            _pol = {}
+        if _pol.get("companies") or _pol.get("ordinary_products"):
+            video_vocab = apply_policy(video_vocab, _pol, langs)
+            logger(
+                f"names policy: keep Latin {_pol.get('companies')}; translate "
+                f"{[(x.get('name'), x.get('ja'), x.get('zh-Hans')) for x in _pol.get('ordinary_products', [])]}"
+            )
     for lang in langs:
         bank = (
             exemplar_bank_for(lang)
