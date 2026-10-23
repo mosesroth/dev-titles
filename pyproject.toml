@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dev-titles"
-version = "0.2.0"
+version = "0.2.1"
 description = "Deterministic subtitle-localization harness: local EN ASR, glossary-aware LLM translation to zh-Hans/ja, CJK re-segmentation, validation and QE. Python import module: dev_titles."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "PyYAML>=6.0",
+    "tomli>=2.0; python_version < '3.11'",  # TOML reader on 3.10 (tomllib is 3.11+)
 ]
 
 [project.optional-dependencies]

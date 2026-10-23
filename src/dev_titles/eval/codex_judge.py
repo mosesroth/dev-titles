@@ -46,7 +46,10 @@ def ensure_clean_codex_home(home: str = JUDGE_HOME, src_home: str = "~/.codex") 
     src = os.path.expanduser(src_home)
     cfg = {}
     try:
-        import tomllib
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10: the tomli backport (a dependency there)
+            import tomli as tomllib  # type: ignore[no-redef]
 
         with open(os.path.join(src, "config.toml"), "rb") as fh:
             cfg = tomllib.load(fh)

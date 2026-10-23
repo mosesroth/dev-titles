@@ -3,6 +3,13 @@
 All notable changes to dev-titles. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and module APIs may still change).
 
+## [0.2.1] — 2026-10-23
+
+### Fixed
+- Python 3.10: the Codex judge's model / provider settings were silently dropped, because `tomllib` is
+  3.11+. It now falls back to the `tomli` backport, a dependency on 3.10 only (caught by the new CI's
+  3.10 job).
+
 ## [0.2.0] — 2026-10-23
 
 ### Added
