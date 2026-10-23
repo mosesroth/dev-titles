@@ -33,13 +33,23 @@ def sync_offsets(target_cues, en_cues) -> list[float]:
     return out
 
 
-def sync_report(target_cues, en_cues, *, max_median: float = 1.8, max_far_share: float = 0.30,
-                min_anchors: int = 15) -> dict:
+def sync_report(
+    target_cues,
+    en_cues,
+    *,
+    max_median: float = 1.8,
+    max_far_share: float = 0.30,
+    min_anchors: int = 15,
+) -> dict:
     """{'anchors', 'median', 'far_share', 'drifted'}; drifted is None when there are too few anchors."""
     d = sync_offsets(target_cues, en_cues)
     if len(d) < min_anchors:
         return {"anchors": len(d), "median": None, "far_share": None, "drifted": None}
     med = statistics.median(d)
     far = sum(x > 3 for x in d) / len(d)
-    return {"anchors": len(d), "median": round(med, 2), "far_share": round(far, 2),
-            "drifted": med > max_median or far > max_far_share}
+    return {
+        "anchors": len(d),
+        "median": round(med, 2),
+        "far_share": round(far, 2),
+        "drifted": med > max_median or far > max_far_share,
+    }

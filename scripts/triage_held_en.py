@@ -22,8 +22,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from dev_titles import en_gate, listen_list
-from dev_titles import llm
+from dev_titles import en_gate, llm
 from dev_titles.cli import _read_any
 from dev_titles.transcribe_qe import load_autosub
 
@@ -71,8 +70,13 @@ def _locate(en, quote):
         if qn in _norm(" ".join(en[k].lines)):  # wholly inside one cue
             return k
     for k in range(len(en) - 1):
-        if qn in _norm(" ".join(" ".join(c.lines) for c in en[k:k + 2])):  # straddles a cue break
-            return k + 1 if _norm(" ".join(en[k + 1].lines)).startswith(qn[-6:]) is False and qn[:6] not in _norm(" ".join(en[k].lines)) else k
+        if qn in _norm(" ".join(" ".join(c.lines) for c in en[k : k + 2])):  # straddles a cue break
+            return (
+                k + 1
+                if _norm(" ".join(en[k + 1].lines)).startswith(qn[-6:]) is False
+                and qn[:6] not in _norm(" ".join(en[k].lines))
+                else k
+            )
     return None
 
 
@@ -94,12 +98,21 @@ def main():
     ap.add_argument("--ticket-dir", default="output/ticket")
     ap.add_argument("--out", default="scratch/triage")
     ap.add_argument("--video", action="append")
-    ap.add_argument("--extra", action="append", default=[], help="NAME=youtube_id for videos not in the manifest")
+    ap.add_argument(
+        "--extra",
+        action="append",
+        default=[],
+        help="NAME=youtube_id for videos not in the manifest",
+    )
     a = ap.parse_args()
     out = Path(a.out)
     (out / "media").mkdir(parents=True, exist_ok=True)
-    ids = dict(re.findall(r"\|\s*(\w+)\s*\|\s*https://www\.youtube\.com/watch\?v=([\w-]+)",
-                          Path(a.manifest).read_text(encoding="utf-8")))
+    ids = dict(
+        re.findall(
+            r"\|\s*(\w+)\s*\|\s*https://www\.youtube\.com/watch\?v=([\w-]+)",
+            Path(a.manifest).read_text(encoding="utf-8"),
+        )
+    )
     ids.update(dict(x.split("=", 1) for x in a.extra))
     from dev_titles.transcribe.parakeet import DEFAULT_MODEL, ParakeetTranscriber
 
@@ -120,18 +133,53 @@ def main():
             continue
         m = out / "media"
         if not (m / f"{v}.mp4").exists():
-            subprocess.run(["yt-dlp", "-q", "-f", "233/140/bestaudio", "-o", str(m / f"{v}.%(ext)s"), "--", vid],
-                           check=False)
-            subprocess.run(["yt-dlp", "-q", "--skip-download", "--write-auto-subs", "--write-subs",
-                            "--sub-langs", "en,en-orig", "--sub-format", "vtt", "-o", str(m / f"{v}"), "--", vid],
-                           check=False)
-        audio = next(iter(sorted(m.glob(f"{v}.mp4")) + sorted(m.glob(f"{v}.m4a")) + sorted(m.glob(f"{v}.webm"))), None)
+            subprocess.run(
+                [
+                    "yt-dlp",
+                    "-q",
+                    "-f",
+                    "233/140/bestaudio",
+                    "-o",
+                    str(m / f"{v}.%(ext)s"),
+                    "--",
+                    vid,
+                ],
+                check=False,
+            )
+            subprocess.run(
+                [
+                    "yt-dlp",
+                    "-q",
+                    "--skip-download",
+                    "--write-auto-subs",
+                    "--write-subs",
+                    "--sub-langs",
+                    "en,en-orig",
+                    "--sub-format",
+                    "vtt",
+                    "-o",
+                    str(m / f"{v}"),
+                    "--",
+                    vid,
+                ],
+                check=False,
+            )
+        audio = next(
+            iter(
+                sorted(m.glob(f"{v}.mp4"))
+                + sorted(m.glob(f"{v}.m4a"))
+                + sorted(m.glob(f"{v}.webm"))
+            ),
+            None,
+        )
         pj = m / f"{v}.parakeet.json"
         if audio and not pj.exists():
             t = asr.transcribe(str(audio))
             pj.write_text(json.dumps([[w.text, w.start] for w in t.words]), encoding="utf-8")
         words = json.loads(pj.read_text()) if pj.exists() else []
-        auto_p = next(iter(sorted(m.glob(f"{v}.en-orig.vtt")) + sorted(m.glob(f"{v}.en.vtt"))), None)
+        auto_p = next(
+            iter(sorted(m.glob(f"{v}.en-orig.vtt")) + sorted(m.glob(f"{v}.en.vtt"))), None
+        )
         auto = load_autosub(str(auto_p)).cues if auto_p else []
         live_p = m / f"{v}.en.vtt"
         live = _read_any(str(live_p), "en").cues if live_p.exists() and auto_p != live_p else []
@@ -148,14 +196,26 @@ def main():
                 i = min(range(len(en)), key=lambda j: abs(en[j].start - t0))
             lo, hi = _sentence(en, i)
             a0, a1 = en[lo].start, en[hi].end
-            items.append({"video": v, "id": vid, "ts": h.get("ts"), "start": round(en[i].start, 1),
-                          "flag": f"{h.get('kind')}: {det}", "quote": quote or "(none quoted)",
-                          "still_in_ours": bool(quote) and _norm(quote) in _norm(_text(en, a0 - 8, a1 + 8)),
-                          "still_live": bool(quote) and bool(live) and _norm(quote) in _norm(_text(live, a0 - 8, a1 + 8)),
-                          "line": " ".join(en[i].lines), "ctx": " ".join(" ".join(x.lines) for x in en[lo:hi + 1]),
-                          "live": _text(live, a0 - 0.5, a1 + 0.5) if live else "(no live EN found)",
-                          "asr1": " ".join(w for w, st in words if a0 - 1.5 <= st <= a1 + 1.5),
-                          "asr2": _text(auto, a0 - 1.5, a1 + 1.5)})
+            items.append(
+                {
+                    "video": v,
+                    "id": vid,
+                    "ts": h.get("ts"),
+                    "start": round(en[i].start, 1),
+                    "flag": f"{h.get('kind')}: {det}",
+                    "quote": quote or "(none quoted)",
+                    "still_in_ours": bool(quote)
+                    and _norm(quote) in _norm(_text(en, a0 - 8, a1 + 8)),
+                    "still_live": bool(quote)
+                    and bool(live)
+                    and _norm(quote) in _norm(_text(live, a0 - 8, a1 + 8)),
+                    "line": " ".join(en[i].lines),
+                    "ctx": " ".join(" ".join(x.lines) for x in en[lo : hi + 1]),
+                    "live": _text(live, a0 - 0.5, a1 + 0.5) if live else "(no live EN found)",
+                    "asr1": " ".join(w for w, st in words if a0 - 1.5 <= st <= a1 + 1.5),
+                    "asr2": _text(auto, a0 - 1.5, a1 + 1.5),
+                }
+            )
         print(f"{v}: {len(held)} held line(s) gathered", flush=True)
 
     def judge(it):
@@ -176,20 +236,28 @@ def main():
 
     with ThreadPoolExecutor(8) as ex:
         items = list(ex.map(judge, items))
-    (out / "triage.json").write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "triage.json").write_text(
+        json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
     from collections import Counter
 
     cnt = Counter(i["verdict"] for i in items)
-    rep = [f"# Held EN lines on delivered videos — triage", "",
-           f"{len(items)} lines: {cnt.get('fix', 0)} fix, {cnt.get('listen', 0)} listen, {cnt.get('ok', 0)} ok, "
-           f"{cnt.get('already fixed', 0)} already fixed "
-           "(both judges must agree on ok/fix, else listen).", ""]
+    rep = [
+        "# Held EN lines on delivered videos — triage",
+        "",
+        f"{len(items)} lines: {cnt.get('fix', 0)} fix, {cnt.get('listen', 0)} listen, {cnt.get('ok', 0)} ok, "
+        f"{cnt.get('already fixed', 0)} already fixed "
+        "(both judges must agree on ok/fix, else listen).",
+        "",
+    ]
     for verdict in ("fix", "listen", "already fixed", "ok"):
         rep += [f"## {verdict} ({cnt.get(verdict, 0)})", ""]
         for i in (x for x in items if x["verdict"] == verdict):
             link = f"https://www.youtube.com/watch?v={i['id']}&t={int(i['start'])}"
             rep.append(f"- **{i['video']} {i['ts']}** ([listen]({link})): {i['line']}")
-            rep.append(f"  - flagged: {i['quote']}  (still in our EN: {i['still_in_ours']}, live: {i['still_live']})")
+            rep.append(
+                f"  - flagged: {i['quote']}  (still in our EN: {i['still_in_ours']}, live: {i['still_live']})"
+            )
             if verdict == "fix":
                 rep.append(f"  - fix: {i['quote']} -> {i['fixed_line']}")
             rep.append(f"  - {i['why']}")

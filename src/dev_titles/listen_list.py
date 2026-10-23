@@ -43,7 +43,7 @@ def locate(cues, quote: str):
         if q in norm(" ".join(c.lines)):
             return k
     for k in range(len(cues) - 1):
-        if q in norm(" ".join(" ".join(c.lines) for c in cues[k:k + 2])):
+        if q in norm(" ".join(" ".join(c.lines) for c in cues[k : k + 2])):
             return k
     return None
 
@@ -65,7 +65,9 @@ def _ts(s):
     return None if not m else int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
 
 
-def build_items(en_cues, held: list[dict], video: str, youtube_id: str = "", asr_words=None) -> list[dict]:
+def build_items(
+    en_cues, held: list[dict], video: str, youtube_id: str = "", asr_words=None
+) -> list[dict]:
     """One item per held line: video, link id, start, sentence, flagged phrase, note, ASR text."""
     items = []
     for h in held:
@@ -78,19 +80,32 @@ def build_items(en_cues, held: list[dict], video: str, youtube_id: str = "", asr
             if t0 is None or not en_cues:
                 continue
             k = min(range(len(en_cues)), key=lambda j: abs(en_cues[j].start - t0))
+        assert k is not None
         lo, hi = sentence(en_cues, k)
-        ctx = " ".join(" ".join(c.lines) for c in en_cues[lo:hi + 1])
+        ctx = " ".join(" ".join(c.lines) for c in en_cues[lo : hi + 1])
         if q and found and norm(q) not in norm(ctx):
             lo, hi = min(lo, k), min(max(hi, k + 1), len(en_cues) - 1)
-            ctx = " ".join(" ".join(c.lines) for c in en_cues[lo:hi + 1])
+            ctx = " ".join(" ".join(c.lines) for c in en_cues[lo : hi + 1])
         a0, a1 = en_cues[lo].start, en_cues[hi].end
         asr = " ".join(w for w, s in (asr_words or []) if a0 - 1 <= s <= a1 + 1)
-        items.append({"video": video, "id": youtube_id, "start": int(en_cues[k].start), "ctx": ctx,
-                      "q": q, "found": found, "note": det, "asr": asr})
+        items.append(
+            {
+                "video": video,
+                "id": youtube_id,
+                "start": int(en_cues[k].start),
+                "ctx": ctx,
+                "q": q,
+                "found": found,
+                "note": det,
+                "asr": asr,
+            }
+        )
     return items
 
 
-def write_html(items: list[dict], path, title: str = "English lines to listen to", answers: dict | None = None) -> Path:
+def write_html(
+    items: list[dict], path, title: str = "English lines to listen to", answers: dict | None = None
+) -> Path:
     e = html.escape
     answers = answers or {}
     out = [
@@ -109,12 +124,19 @@ def write_html(items: list[dict], path, title: str = "English lines to listen to
         if x.get("found") and x.get("q"):
             m = re.search(re.escape(e(x["q"])).replace(r"\ ", r"\s+"), ctx, re.I)
             if m:
-                ctx = ctx[:m.start()] + f"<span class='q'>{ctx[m.start():m.end()]}</span>" + ctx[m.end():]
+                ctx = (
+                    ctx[: m.start()]
+                    + f"<span class='q'>{ctx[m.start():m.end()]}</span>"
+                    + ctx[m.end() :]
+                )
         if x.get("q") and not x.get("found"):
             ctx += "<br><span class='w'>The flagged words aren't in our English any more — just check that this line is right.</span>"
         when = f"{x['start'] // 60:02d}:{x['start'] % 60:02d}"
-        head = (f"<a href='{link}' target='_blank'>{e(x['video'])} — {when}</a>" if link
-                else f"<b>{e(x['video'])} — {when}</b> <span class='w'>(no YouTube link: play the file at {when})</span>")
+        head = (
+            f"<a href='{link}' target='_blank'>{e(x['video'])} — {when}</a>"
+            if link
+            else f"<b>{e(x['video'])} — {when}</b> <span class='w'>(no YouTube link: play the file at {when})</span>"
+        )
         rows = [("Our English", ctx), ("Reviewer's note", e(x["note"]))]
         if "asr" in x:
             rows.append(("Parakeet heard", e(x["asr"]) or "(no transcript for this moment)"))
@@ -147,4 +169,6 @@ def for_out_dir(en, out_dir, held: list[dict]) -> Path | None:
     asr = out_dir / "parakeet.json"
     words = json.loads(asr.read_text(encoding="utf-8")) if asr.exists() else None
     items = build_items(en.cues, held, out_dir.name, youtube_id(out_dir), words)
-    return write_html(items, out_dir / "EN_LISTEN.html", f"English lines to listen to — {out_dir.name}")
+    return write_html(
+        items, out_dir / "EN_LISTEN.html", f"English lines to listen to — {out_dir.name}"
+    )

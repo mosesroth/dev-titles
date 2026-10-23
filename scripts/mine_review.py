@@ -23,9 +23,9 @@ import json
 import re
 from pathlib import Path
 
+from dev_titles import llm
 from dev_titles.cli import _read_any
 from dev_titles.resegment import merge_en_to_sentences
-from dev_titles import llm
 
 CURATE = """You curate teaching examples for a {L} subtitle editor. Each item is an English line, our MACHINE
 subtitle, and the HUMAN reviewer's final subtitle. Keep ONLY items where the human edit fixes something a
@@ -61,8 +61,11 @@ def mine(video, lang, mdir, hdir):
     out = []
     for k, s in enumerate(sents):
         m = norm(rec.get(s.text.strip()))
-        h = (norm(aligned[k].replace("|", "")) if aligned is not None
-             else "".join(norm(c.text) for c in hum if s.start <= (c.start + c.end) / 2 < s.end))
+        h = (
+            norm(aligned[k].replace("|", ""))
+            if aligned is not None
+            else "".join(norm(c.text) for c in hum if s.start <= (c.start + c.end) / 2 < s.end)
+        )
         if not m or not h or m == h:
             continue
         r = difflib.SequenceMatcher(None, m, h, autojunk=False).ratio()
@@ -134,7 +137,9 @@ def main():
     final += [p for p in kept if p not in final]
     final = final[: a.keep]
     out = Path(a.out.format(lang=a.lang))
-    out.write_text("\n".join(json.dumps(p, ensure_ascii=False) for p in final) + "\n", encoding="utf-8")
+    out.write_text(
+        "\n".join(json.dumps(p, ensure_ascii=False) for p in final) + "\n", encoding="utf-8"
+    )
     print(f"wrote {len(final)} examples -> {out}")
     rep = out.with_suffix(".substitutions.txt")
     rep.write_text(

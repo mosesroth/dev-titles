@@ -18,7 +18,9 @@ from .prompts import build_reflect_prompt, build_translate_prompt
 
 
 class CodexTranslator(Translator):
-    def __init__(self, *, model_id: str | None = None, timeout: float = 600.0, retries: int = 4, judge=None):
+    def __init__(
+        self, *, model_id: str | None = None, timeout: float = 600.0, retries: int = 4, judge=None
+    ):
         self.model_id = model_id
         self.retries = retries
         self._codex = judge or CodexCliJudge(model=model_id, timeout=timeout)
@@ -30,7 +32,9 @@ class CodexTranslator(Translator):
                 out = self._codex.invoke(prompt)
                 if out:
                     return out
-                last = RuntimeError("codex returned no output (check `codex login` / ~/.codex config)")
+                last = RuntimeError(
+                    "codex returned no output (check `codex login` / ~/.codex config)"
+                )
             except (subprocess.TimeoutExpired, OSError, RuntimeError) as e:
                 last = e
             if attempt < self.retries:

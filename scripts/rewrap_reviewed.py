@@ -33,7 +33,9 @@ def _is_kata(ch):
     return "\u30a0" <= ch <= "\u30ff"
 
 
-_JA_SENT_END = re.compile(r"(です|ます|ました|でした|ません|ましょう|ですね|ますね|ですか|ますか|ください|か|ね|よ)$")
+_JA_SENT_END = re.compile(
+    r"(です|ます|ました|でした|ません|ましょう|ですね|ますね|ですか|ますか|ください|か|ね|よ)$"
+)
 
 
 def join_lines(lines, lang="ja"):
@@ -156,7 +158,10 @@ def main():
             if lang == "ja":
                 # JP subtitle style guide (confirmed by a native reviewer): 読点 -> half-width space,
                 # 句点 -> full-width
-                new = [re.sub(r"\s*。\s*", "　", re.sub(r"\s*、\s*", " ", ln)).strip(" 　") for ln in lines]
+                new = [
+                    re.sub(r"\s*。\s*", "　", re.sub(r"\s*、\s*", " ", ln)).strip(" 　")
+                    for ln in lines
+                ]
                 punct += sum(ln.count("、") + ln.count("。") for ln in lines)
                 lines = new
             bad = len(lines) > spec.max_lines or any(

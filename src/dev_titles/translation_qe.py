@@ -380,14 +380,19 @@ def qe_repair(
     targets |= set(extra_flags or [])
     targets |= set(extra_critiques)  # term-consistency cues (canonical-rendering fix)
     if protected:
+
         def _both_major(i):
             seg = per_seg.get(i, {})
             vals = [v for v in seg.values() if isinstance(v, dict)]
-            return len(vals) >= 2 and all(v.get("major", 0) + v.get("critical", 0) > 0 for v in vals)
+            return len(vals) >= 2 and all(
+                v.get("major", 0) + v.get("critical", 0) > 0 for v in vals
+            )
 
         held = {i for i in targets & set(protected) if not _both_major(i)}
         if held:
-            log(f"{lang}: QE-repair — {len(held)} native-editor rewrite(s) protected (not corroborated)")
+            log(
+                f"{lang}: QE-repair — {len(held)} native-editor rewrite(s) protected (not corroborated)"
+            )
         targets -= held
     order = sorted(targets, key=lambda i: -_seg_penalty(per_seg.get(i, {})))[:max_repairs]
     repaired = []

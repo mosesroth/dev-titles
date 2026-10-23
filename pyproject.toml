@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dev-titles"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic subtitle-localization harness: local EN ASR, glossary-aware LLM translation to zh-Hans/ja, CJK re-segmentation, validation and QE. Python import module: dev_titles."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,7 +34,8 @@ youtube = ["yt-dlp", "google-api-python-client>=2.0", "google-auth-oauthlib>=1.0
 xlsx = ["openpyxl>=3.1"]                             # .xlsx term-base import + audit report
 qe = ["unbabel-comet>=2.2"]                          # optional CometKiwi QE (gated HF model: accept license + hf auth login)
 search = ["ddgs>=6.0"]  # DuckDuckGo fallback for auto doc-grounding (Google CSE needs no dep)
-dev = ["pytest>=8.0", "bandit>=1.7", "defusedxml>=0.7", "pytest-cov", "black", "isort", "flake8", "mypy"]
+# lint tools pinned: the pre-push gate and CI must format and check identically
+dev = ["pytest>=8.0", "bandit==1.9.4", "defusedxml>=0.7", "pytest-cov", "black==26.10.1", "isort==9.0.2", "flake8==7.4.1", "mypy==2.4.0"]
 
 [project.scripts]
 dev-titles = "dev_titles.cli:main"
@@ -48,6 +49,7 @@ dev_titles = ["py.typed"]
 
 [tool.black]
 line-length = 100
+target-version = ["py310"]
 
 [tool.isort]
 known_first_party = ["dev_titles"]

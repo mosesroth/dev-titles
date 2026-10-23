@@ -15,7 +15,7 @@ and grade, against the human text, every line that either gate would change: ORI
 SUGGESTION, each graded by TWO graders (Claude + GPT) in randomized order -> improved / neutral /
 harmed per gate. -> <out>/grades.jsonl, <out>/REPORT.md
 
-  PYTHONPATH=src python3 scripts/gate_benchmark.py --lang ja --video VideoA --video ... [--out output/gate_bench]
+  PYTHONPATH=src python3 scripts/eval/gate_benchmark.py --lang ja --video VideoA --video ... [--out output/gate_bench]
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import re
 import types
 from pathlib import Path
 
+from dev_titles import llm
 from dev_titles.cli import _qe_second_judge, _read_any
 from dev_titles.editor import (
     EDIT_PROMPT,
@@ -38,7 +39,6 @@ from dev_titles.editor import (
     video_description,
 )
 from dev_titles.resegment import merge_en_to_sentences
-from dev_titles import llm
 
 LNAME = {"ja": "Japanese", "zh-Hans": "Simplified Chinese"}
 GRADE = """You are a native {L} speaker and professional subtitle reviewer. For each item: the English line, a
@@ -67,7 +67,9 @@ def load_examples_excluding(lang, video, k=12):
     if not rows:
         return ""
     L = LNAME[lang]
-    lines = "\n".join(f"- EN: {e['en']}\n  before: {e['before']}\n  after:  {e['after']}" for e in rows)
+    lines = "\n".join(
+        f"- EN: {e['en']}\n  before: {e['before']}\n  after:  {e['after']}" for e in rows
+    )
     return f"\nEdits native {L} reviewers made to earlier machine drafts (learn the KIND of fix, don't copy):\n{lines}\n"
 
 
@@ -81,8 +83,12 @@ def phase1(video, lang, a, inv, gpt):
     en = _read_any(str(tdir / "en.vtt"), "en")
     bdir = Path(a.out) / "briefs"
     bdir.mkdir(parents=True, exist_ok=True)
-    brief = video_brief(" ".join(c.text for c in en.cues), inv, bdir / f"{video}.txt",
-                        description=video_description(tdir))
+    brief = video_brief(
+        " ".join(c.text for c in en.cues),
+        inv,
+        bdir / f"{video}.txt",
+        description=video_description(tdir),
+    )
     L = LNAME[lang]
     examples = load_examples_excluding(lang, video)
     by_i = {r["i"]: r for r in recs}
@@ -94,9 +100,15 @@ def phase1(video, lang, a, inv, gpt):
         for n, r in enumerate(chunk, 1):
             h = deterministic_hints(r["txt"], lang)
             rows.append(f"{n} | {r['src']} | {r['txt']}" + (f" | {', '.join(h)}" if h else ""))
-        prompt = EDIT_PROMPT.format(L=L, brief=brief or "(none)", register="polite, natural spoken",
-                                    terms="(product names in Latin)", examples=examples,
-                                    hint_col=" | hints", items="\n".join(rows))
+        prompt = EDIT_PROMPT.format(
+            L=L,
+            brief=brief or "(none)",
+            register="polite, natural spoken",
+            terms="(product names in Latin)",
+            examples=examples,
+            hint_col=" | hints",
+            items="\n".join(rows),
+        )
         try:
             flags = _parse_json_array(inv(prompt) or "")
         except Exception:
@@ -120,18 +132,36 @@ def phase1(video, lang, a, inv, gpt):
                 d = {}
             better = d.get("better")
             prefers_new = better == ("A" if swap else "B")
-            sugg.append({"video": video, "lang": lang, "i": r["i"], "src": r["src"], "orig": r["txt"],
-                         "sugg": new, "issue": f.get("issue", ""), "same_meaning": bool(d.get("same_meaning")),
-                         "prefers_new": prefers_new, "tie": better == "tie"})
-        print(f"  {video} {lang} {min(k + 6, len(recs))}/{len(recs)} suggestions={len(sugg)}", flush=True)
-    out.write_text("\n".join(json.dumps(s, ensure_ascii=False) for s in sugg) + "\n", encoding="utf-8")
+            sugg.append(
+                {
+                    "video": video,
+                    "lang": lang,
+                    "i": r["i"],
+                    "src": r["src"],
+                    "orig": r["txt"],
+                    "sugg": new,
+                    "issue": f.get("issue", ""),
+                    "same_meaning": bool(d.get("same_meaning")),
+                    "prefers_new": prefers_new,
+                    "tie": better == "tie",
+                }
+            )
+        print(
+            f"  {video} {lang} {min(k + 6, len(recs))}/{len(recs)} suggestions={len(sugg)}",
+            flush=True,
+        )
+    out.write_text(
+        "\n".join(json.dumps(s, ensure_ascii=False) for s in sugg) + "\n", encoding="utf-8"
+    )
     return sugg
 
 
 def human_text(video, lang, a, src_to_window):
     hum = _read_any(str(Path(a.human_dir) / f"{video}.{lang}.srt"), lang).cues
-    return {s: "".join(norm(c.text) for c in hum if st <= (c.start + c.end) / 2 < e)
-            for s, (st, e) in src_to_window.items()}
+    return {
+        s: "".join(norm(c.text) for c in hum if st <= (c.start + c.end) / 2 < e)
+        for s, (st, e) in src_to_window.items()
+    }
 
 
 def grade_items(items, lang, grader, label):
@@ -139,8 +169,10 @@ def grade_items(items, lang, grader, label):
     out = {}
     for k in range(0, len(items), 10):
         ch = items[k : k + 10]
-        body = "\n\n".join(f"{n + 1}. EN: {x['en']}\n   REFERENCE: {x['ref']}\n   CANDIDATE: {x['cand']}"
-                           for n, x in enumerate(ch))
+        body = "\n\n".join(
+            f"{n + 1}. EN: {x['en']}\n   REFERENCE: {x['ref']}\n   CANDIDATE: {x['cand']}"
+            for n, x in enumerate(ch)
+        )
         try:
             o = grader(GRADE.format(L=LNAME[lang], body=body)) or ""
             js = _parse_json_array(o)
@@ -167,7 +199,9 @@ def main():
     inv = llm.invoke()
     gpt = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
     if gpt is None:
-        raise SystemExit("no different-family second judge available (needs both the claude and codex CLIs)")
+        raise SystemExit(
+            "no different-family second judge available (needs both the claude and codex CLIs)"
+        )
     allsug, total = [], 0
     for v in a.video:
         try:
@@ -205,10 +239,19 @@ def main():
         if None in o + s_:
             continue
         d = sum(RANK[b] - RANK[a_] for a_, b in zip(o, s_)) / 2  # <0 improved, >0 harmed
-        rows.append({**x, "gate": "strict" if x in strict else "loose_only", "orig_lv": o, "sugg_lv": s_,
-                     "delta": d, "meaning_harm": any(RANK[b] == 2 and RANK[a_] < 2 for a_, b in zip(o, s_))})
+        rows.append(
+            {
+                **x,
+                "gate": "strict" if x in strict else "loose_only",
+                "orig_lv": o,
+                "sugg_lv": s_,
+                "delta": d,
+                "meaning_harm": any(RANK[b] == 2 and RANK[a_] < 2 for a_, b in zip(o, s_)),
+            }
+        )
     Path(a.out, f"grades.{a.lang}.jsonl").write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8"
+    )
 
     def summ(name, R):
         if not R:
@@ -218,15 +261,22 @@ def main():
         mh = sum(r["meaning_harm"] for r in R)
         return f"| {name} | {len(R)} | {imp} ({imp/len(R):.0%}) | {len(R)-imp-harm} | {harm} ({harm/len(R):.0%}) | {mh} |"
 
-    lines = [f"# Gate benchmark — {a.lang}", "",
-             f"{len(a.video)} videos, {total} sentences; {len(allsug)} guarded editor suggestions; "
-             f"strict gate accepts {len(strict)}, loose gate accepts {len(strict) + len(loose_only)}.", "",
-             "Each changed line graded ORIGINAL vs SUGGESTION by two graders (Claude + GPT), randomized, against the human text.", "",
-             "| set | lines | improved | neutral | harmed | new MEANING errors |", "|---|---|---|---|---|---|",
-             summ("strict-accepted (current gate)", [r for r in rows if r["gate"] == "strict"]),
-             summ("loose-only (extra under option 1)", [r for r in rows if r["gate"] == "loose_only"]),
-             "", f"Per 1,000 sentences: strict changes {1000*len(strict)/max(total,1):.0f} lines; "
-             f"loose changes {1000*(len(strict)+len(loose_only))/max(total,1):.0f}."]
+    lines = [
+        f"# Gate benchmark — {a.lang}",
+        "",
+        f"{len(a.video)} videos, {total} sentences; {len(allsug)} guarded editor suggestions; "
+        f"strict gate accepts {len(strict)}, loose gate accepts {len(strict) + len(loose_only)}.",
+        "",
+        "Each changed line graded ORIGINAL vs SUGGESTION by two graders (Claude + GPT), randomized, against the human text.",
+        "",
+        "| set | lines | improved | neutral | harmed | new MEANING errors |",
+        "|---|---|---|---|---|---|",
+        summ("strict-accepted (current gate)", [r for r in rows if r["gate"] == "strict"]),
+        summ("loose-only (extra under option 1)", [r for r in rows if r["gate"] == "loose_only"]),
+        "",
+        f"Per 1,000 sentences: strict changes {1000*len(strict)/max(total, 1):.0f} lines; "
+        f"loose changes {1000*(len(strict)+len(loose_only))/max(total, 1):.0f}.",
+    ]
     Path(a.out, f"REPORT.{a.lang}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     print("DONE")

@@ -35,7 +35,9 @@ def en_hash(en) -> str:
 def save_review_state(out, status: str, held: list[dict], applied: int = 0) -> None:
     """status: 'ok' (review ran) or 'failed' (review crashed — blocks translation)."""
     Path(out, STATE).write_text(
-        json.dumps({"status": status, "applied": applied, "held": held}, ensure_ascii=False, indent=1),
+        json.dumps(
+            {"status": status, "applied": applied, "held": held}, ensure_ascii=False, indent=1
+        ),
         encoding="utf-8",
     )
 
@@ -82,7 +84,11 @@ def check(en, out) -> tuple[bool, str, list[dict]]:
     if status != "ok":
         return False, f"the EN review did not run successfully (status: {status})", held
     if held:
-        return False, (stale + "; " if stale else "") + f"{len(held)} EN line(s) held for review", held
+        return (
+            False,
+            (stale + "; " if stale else "") + f"{len(held)} EN line(s) held for review",
+            held,
+        )
     if stale:
         return False, stale, []
     approve(out, en, by="auto: EN review held nothing")
@@ -98,7 +104,9 @@ def require(en, out, en_path: str = "") -> bool:
     print(f"\nSTOP — not translating: {why}.")
     for h in held:
         print(f"  {h.get('ts', '?'):>6}  {h.get('kind', '')}: {h.get('detail', '')}")
-    if held:  # SOP: the person resolves held lines by LISTENING — one clickable page, links 2 s early
+    if (
+        held
+    ):  # SOP: the person resolves held lines by LISTENING — one clickable page, links 2 s early
         from .listen_list import for_out_dir
 
         try:
@@ -107,6 +115,8 @@ def require(en, out, en_path: str = "") -> bool:
         except Exception as e:  # never let the page block the message itself
             print(f"(listen list not written: {type(e).__name__})")
     target = en_path or str(Path(out, "en.vtt"))
-    print(f"\nResolve each held line in {target} (or confirm it is right), then sign off:\n"
-          f"  PYTHONPATH=src python3 -m dev_titles.cli approve-en {out} --en {target}\n")
+    print(
+        f"\nResolve each held line in {target} (or confirm it is right), then sign off:\n"
+        f"  PYTHONPATH=src python3 -m dev_titles.cli approve-en {out} --en {target}\n"
+    )
     return False

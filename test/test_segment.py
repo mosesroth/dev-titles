@@ -1,31 +1,11 @@
 import re
+
 """Split from test_core: segment tests (25)."""
 
 from dev_titles.config import spec_for
-from dev_titles.cue_builder import build_en_cues
-from dev_titles.eval import (
-    GembaMqmScorer,
-    QeResult,
-    QeScorer,
-    below_threshold_segments,
-    parse_gemba_mqm,
-    rank_engines,
-)
-from dev_titles.formats import read_vtt, write_srt, write_vtt
-from dev_titles.glossary import load
 from dev_titles.linguistics import get_joiner, is_repeated_text
-from dev_titles.model import Cue, Subtitle
 from dev_titles.segment import apply_kinsoku, break_lines, normalize_zh_punct
 from dev_titles.textwidth import display_width
-from dev_titles.transcribe import from_transcribe_json
-from dev_titles.translate import (
-    TranslationRequest,
-    Translator,
-    build_translate_prompt,
-    translate_segment,
-)
-from dev_titles.validate import validate_subtitle
-from dev_titles.validate.rules import validity_report
 
 
 def test_cjk_break_keeps_latin_words_whole():
@@ -161,7 +141,9 @@ def test_wrap_lines_preserves_characters():
         for txt in cases:
             lines = wrap_lines(txt, spec)
             joined, want = "".join(lines).replace(" ", ""), txt.replace(" ", "")
-            if lang.startswith("zh"):  # CN SG: a line-edge ，、； is dropped (the break is the pause)
+            if lang.startswith(
+                "zh"
+            ):  # CN SG: a line-edge ，、； is dropped (the break is the pause)
                 assert not any(ln.endswith(("，", "、", "；")) for ln in lines), lines
                 joined, want = re.sub("[，、；]", "", joined), re.sub("[，、；]", "", want)
             assert joined == want, (lang, txt, joined)
@@ -414,15 +396,21 @@ def test_en_sentences_keep_dotted_names_and_lowercase_continuations():
     from dev_titles.model import Cue, Subtitle
     from dev_titles.resegment import merge_en_to_sentences
 
-    en = Subtitle("en", [
-        Cue(0, 2, ["And then also as a React."]),
-        Cue(2, 4, ["js developer, you're used to it."]),
-        Cue(4, 6, ["Yes, my company is DNA."]),
-        Cue(6, 8, ["inc, a short intro. Next one."]),
-    ])
+    en = Subtitle(
+        "en",
+        [
+            Cue(0, 2, ["And then also as a React."]),
+            Cue(2, 4, ["js developer, you're used to it."]),
+            Cue(4, 6, ["Yes, my company is DNA."]),
+            Cue(6, 8, ["inc, a short intro. Next one."]),
+        ],
+    )
     texts = [s.text for s in merge_en_to_sentences(en)]
-    assert texts == ["And then also as a React.js developer, you're used to it.",
-                     "Yes, my company is DNA. inc, a short intro.", "Next one."]
+    assert texts == [
+        "And then also as a React.js developer, you're used to it.",
+        "Yes, my company is DNA. inc, a short intro.",
+        "Next one.",
+    ]
 
 
 def test_cjk_breaks_prefer_sentence_ends_and_merge_short_sentences():
@@ -440,21 +428,41 @@ def test_cjk_breaks_prefer_sentence_ends_and_merge_short_sentences():
     assert wrap_lines(txt, ja)[:2] == ["両者は密接に", "結合しているべきではありません"]
     first = resegment_translation(txt, 0.0, 6.0, ja)[0]
     assert first.lines[-1].endswith("ありません"), first.lines  # the cue ends with the sentence
-    en = Subtitle("en", [Cue(0.0, 1.2, ["I'll DM you."]), Cue(1.2, 2.0, ["Amazing."]),
-                         Cue(2.0, 3.4, ["Great app."]), Cue(3.4, 4.2, ["Nice."])])
+    en = Subtitle(
+        "en",
+        [
+            Cue(0.0, 1.2, ["I'll DM you."]),
+            Cue(1.2, 2.0, ["Amazing."]),
+            Cue(2.0, 3.4, ["Great app."]),
+            Cue(3.4, 4.2, ["Nice."]),
+        ],
+    )
     sents = merge_en_to_sentences(en)
-    cues = build_target_cues(en, sents, ["DMを送ります", "凄いですね", "素晴らしいアプリです", "いいですね"],
-                             ja, free_segment=True)
+    cues = build_target_cues(
+        en,
+        sents,
+        ["DMを送ります", "凄いですね", "素晴らしいアプリです", "いいですね"],
+        ja,
+        free_segment=True,
+    )
     assert len(cues) <= 2 and all(len(c.lines) <= 2 for c in cues), [c.lines for c in cues]
-    assert "".join("".join(c.lines) for c in cues).replace("　", "") == "DMを送ります凄いですね素晴らしいアプリですいいですね"
+    assert (
+        "".join("".join(c.lines) for c in cues).replace("　", "")
+        == "DMを送ります凄いですね素晴らしいアプリですいいですね"
+    )
 
 
 def test_en_layout_rejoins_dotted_name_split_across_cues():
     from dev_titles.model import Cue, Subtitle
     from dev_titles.resegment import normalize_en_layout
 
-    sub = Subtitle("en", [Cue(0, 3, ["the other one", "is that as a React."]),
-                          Cue(3, 6, ["js developer, you're used", "to everything in React."])])
+    sub = Subtitle(
+        "en",
+        [
+            Cue(0, 3, ["the other one", "is that as a React."]),
+            Cue(3, 6, ["js developer, you're used", "to everything in React."]),
+        ],
+    )
     out = normalize_en_layout(sub).cues
     assert out[0].lines[-1].endswith("React.js") and out[1].lines[0].startswith("developer")
     assert out[1].lines[-1].endswith("in React.")  # a real sentence end is left alone
@@ -477,7 +485,9 @@ def test_kinsoku_never_splits_a_katakana_word():
     from dev_titles.config import spec_for
     from dev_titles.segment import wrap_lines
 
-    lines = wrap_lines("「サイズの都合上 アセット・サムネイル・プレビューは表示されません」", spec_for("ja"))
+    lines = wrap_lines(
+        "「サイズの都合上 アセット・サムネイル・プレビューは表示されません」", spec_for("ja")
+    )
     assert not any(a.endswith("サムネイ") for a in lines), lines
     assert all(not ln.startswith("・") for ln in lines)
 
@@ -488,10 +498,27 @@ def test_en_layout_split_has_no_orphans_or_leading_punctuation():
     from dev_titles.model import Cue, Subtitle
     from dev_titles.resegment import normalize_en_layout
 
-    sub = Subtitle("en", [Cue(0, 6, ["the task might be, and then it just fades into the background",
-                                     "when you don't need it. And another long tail here"]),
-                          Cue(6, 12, ["change how the team thinks about it. That's been an amazing thing with Orbit+ ,",
-                                      "that we're in the hands of millions and millions of users in the US, Canada,"])])
+    sub = Subtitle(
+        "en",
+        [
+            Cue(
+                0,
+                6,
+                [
+                    "the task might be, and then it just fades into the background",
+                    "when you don't need it. And another long tail here",
+                ],
+            ),
+            Cue(
+                6,
+                12,
+                [
+                    "change how the team thinks about it. That's been an amazing thing with Orbit+ ,",
+                    "that we're in the hands of millions and millions of users in the US, Canada,",
+                ],
+            ),
+        ],
+    )
     out = normalize_en_layout(sub).cues
     assert all(len(c.lines) <= 2 and all(len(ln) <= 42 for ln in c.lines) for c in out)
     assert all(len(" ".join(c.lines).split()) >= 3 for c in out)
@@ -507,8 +534,16 @@ def test_en_sentence_start_capitalized_but_not_products():
     assert capitalize_sentence_starts("seconds delay. it's like,") == "seconds delay. It's like,"
     assert capitalize_sentence_starts("the project. tmux is good") == "the project. tmux is good"
     assert capitalize_sentence_starts("e.g. the app") == "e.g. the app"
-    out = normalize_en_layout(Subtitle("en", [Cue(0, 2, ["a couple of seconds delay."]),
-                                              Cue(2, 4, ["it's like, a lot"]), Cue(4, 6, ["tmux is a good way"])]))
+    out = normalize_en_layout(
+        Subtitle(
+            "en",
+            [
+                Cue(0, 2, ["a couple of seconds delay."]),
+                Cue(2, 4, ["it's like, a lot"]),
+                Cue(4, 6, ["tmux is a good way"]),
+            ],
+        )
+    )
     assert out.cues[1].lines[0].startswith("It's") and out.cues[2].lines[0].startswith("tmux")
 
 

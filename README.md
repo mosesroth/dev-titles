@@ -71,14 +71,14 @@ layout rules, validation and the guards that keep the LLM honest.
    line). Two speakers never share a subtitle. It enforces per-language cps/cpl limits,
    Japanese kinsoku (moving a whole word, never splitting one) and phrase (bunsetsu)
    boundaries, Chinese full-width punctuation rules, and keeps names and glossary targets on
-   one line and in one cue. `scripts/seg_eval.py` scores segmentation against a reviewer's
+   one line and in one cue. `scripts/eval/seg_eval.py` scores segmentation against a reviewer's
    corrected tracks.
 6. **Japanese condensation.** Japanese has a much lower reading-speed budget than English.
    Only multi-line sentences faster than about 10 characters a second are tightened, the way a
    subtitle editor would; one-line sentences get reading time from merging and lingering
    instead, because trimming them only removes politeness. Names, numbers, thanks and
    politeness are protected. Turn it off with `--no-condense`; measure it with
-   `scripts/condense_benchmark.py`.
+   `scripts/eval/condense_benchmark.py`.
 7. **Native-editor pass.** A reference-free native subtitle editor flags lines a native viewer
    would notice: literal idioms, odd terms, wrong register, run-ons, context misreads. It
    proposes a minimal rewrite for each. A rewrite lands only if:
@@ -195,9 +195,9 @@ Once reviewers have corrected some of your subtitles, these scripts use their co
   keeps the generalizable ones as few-shot examples for the native editor
   (`glossary/editor_examples.<lang>.jsonl`). It also writes a report of recurring
   substitutions, which are candidate glossary rules.
-- `scripts/benchmark.py` grades two runs (OLD/NEW) against the human subtitles, pairing each
+- `scripts/eval/benchmark.py` grades two runs (OLD/NEW) against the human subtitles, pairing each
   sentence across runs, as OK / NOTICEABLE / MEANING.
-- `scripts/gate_benchmark.py`, `gate_compare.py` and `gate_rescue.py` measure the editor's
+- `scripts/eval/gate_benchmark.py`, `gate_compare.py` and `gate_rescue.py` measure the editor's
   acceptance gates against human reviews. Each suggestion is graded before and after by two
   graders from different model families, and the candidate gates are replayed. The current
   gate was chosen this way.
@@ -207,7 +207,7 @@ Once reviewers have corrected some of your subtitles, these scripts use their co
   a rewrite). Protected glossary terms are checked deterministically; a proofreader proposes
   fixes; each fix is applied only if it wins a **blind** comparison against the vendor's line
   (two judges, both A/B orders). Use it when you can't send the delivery back.
-- `scripts/ab_vs_human.py` re-translates an already-reviewed video with the current harness
+- `scripts/eval/ab_vs_human.py` re-translates an already-reviewed video with the current harness
   (held out: `SUBTITLE_HOLDOUT_VIDEOS`, TM / exemplar exclusion) and compares it per sentence to
   the human final. Read only the "human better (both judges)" lines as actionable: similarity
   scores favour the old draft the human edited from, and LLM judges favour machine text.

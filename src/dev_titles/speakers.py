@@ -38,7 +38,10 @@ Return ONLY a JSON array with one speaker name per line, in order, e.g. ["Sam (h
 
 
 def _key(sents, brief):
-    h = hashlib.sha1(("\x00".join(s.text for s in sents) + "\x01" + (brief or "")).encode("utf-8"), usedforsecurity=False)
+    h = hashlib.sha1(
+        ("\x00".join(s.text for s in sents) + "\x01" + (brief or "")).encode("utf-8"),
+        usedforsecurity=False,
+    )
     return h.hexdigest()[:16]
 
 
@@ -46,8 +49,11 @@ def from_asr(sents, words) -> list[str]:
     """Majority speaker of the ASR words inside each sentence window ('' if none)."""
     out = []
     for s in sents:
-        c = Counter(w.get("speaker") for w in words
-                    if w.get("speaker") and s.start - 0.05 <= (w["start"] + w["end"]) / 2 <= s.end + 0.05)
+        c = Counter(
+            w.get("speaker")
+            for w in words
+            if w.get("speaker") and s.start - 0.05 <= (w["start"] + w["end"]) / 2 <= s.end + 0.05
+        )
         out.append(c.most_common(1)[0][0] if c else "")
     # fill gaps from the neighbor (a sentence whose window caught no word)
     for i, v in enumerate(out):
@@ -63,12 +69,21 @@ def from_llm(sents, invoke, brief="", chunk=40) -> list[str]:
         prev = ""
         if labels:
             tail = list(zip(sents[max(0, k - 4) : k], labels[-4:]))
-            prev = "\nPREVIOUS LINES (already labeled):\n" + "\n".join(f"[{sp}] {s.text}" for s, sp in tail) + "\n"
+            prev = (
+                "\nPREVIOUS LINES (already labeled):\n"
+                + "\n".join(f"[{sp}] {s.text}" for s, sp in tail)
+                + "\n"
+            )
         lines = "\n".join(f"{n + 1}. {s.text}" for n, s in enumerate(part))
         got: list[str] = []
         for _ in range(2):
             try:
-                m = re.search(r"\[.*\]", invoke(PROMPT.format(brief=brief or "(none)", previous=prev, lines=lines)) or "", re.S)
+                m = re.search(
+                    r"\[.*\]",
+                    invoke(PROMPT.format(brief=brief or "(none)", previous=prev, lines=lines))
+                    or "",
+                    re.S,
+                )
                 got = [str(x).strip() for x in json.loads(m.group(0))] if m else []
             except Exception:
                 got = []
@@ -83,13 +98,15 @@ def from_llm(sents, invoke, brief="", chunk=40) -> list[str]:
 def _canonical(labels):
     """One spelling per person: 'Host (host)' / 'Host' / 'host' -> the most common full form."""
     key = lambda x: re.sub(r"\s*\(.*?\)", "", x).strip().lower()
-    best = {}
+    best: dict = {}
     for k, form in ((key(x), x) for x in labels if x):
         best.setdefault(k, Counter())[form] += 1
     return [best[key(x)].most_common(1)[0][0] if x else x for x in labels]
 
 
-def label_speakers(sents, invoke=None, cache_path=None, brief="", raw_path=None, logger=print) -> list[str]:
+def label_speakers(
+    sents, invoke=None, cache_path=None, brief="", raw_path=None, logger=print
+) -> list[str]:
     """One speaker label per sentence, or [] when there is only one speaker (or nothing to go on)."""
     if not sents:
         return []
@@ -117,10 +134,15 @@ def label_speakers(sents, invoke=None, cache_path=None, brief="", raw_path=None,
     if len({x for x in labels if x}) < 2:
         labels = []  # one speaker: nothing to tell the translator
     if p:
-        p.write_text(json.dumps({"key": key, "source": source, "labels": labels}, ensure_ascii=False), encoding="utf-8")
+        p.write_text(
+            json.dumps({"key": key, "source": source, "labels": labels}, ensure_ascii=False),
+            encoding="utf-8",
+        )
     if labels:
         turns = sum(1 for a, b in zip(labels, labels[1:]) if a != b)
-        logger(f"speakers ({source}): {len(set(labels))} speakers, {turns} turn changes over {len(labels)} sentences")
+        logger(
+            f"speakers ({source}): {len(set(labels))} speakers, {turns} turn changes over {len(labels)} sentences"
+        )
     return labels
 
 
@@ -141,6 +163,8 @@ def speaker_note(i, labels) -> str:
         return ""
     note = f"\nSPEAKER OF THE LINE TO TRANSLATE: {labels[i]}."
     if i > 0 and labels[i - 1] and labels[i - 1] != labels[i]:
-        note += (f" The previous line was said by {labels[i - 1]} — this line is a different person "
-                 "(a reply or reaction: render who says what, and to whom, accordingly).")
+        note += (
+            f" The previous line was said by {labels[i - 1]} — this line is a different person "
+            "(a reply or reaction: render who says what, and to whom, accordingly)."
+        )
     return note

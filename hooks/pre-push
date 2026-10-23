@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pre-push gate: the test suite (incl. the no-machine-paths check) + Bandit security scan
+# Pre-push gate: black / isort / flake8 / mypy, the test suite (incl. the no-machine-paths check) + Bandit security scan
 # (medium severity and up) on src/ and scripts/. Catches common patterns security
 # scanners flag (temp-dir files, weak hashes, unsafe XML/URL handling) before they land.
 # Enable once per clone:  git config core.hooksPath hooks
@@ -27,6 +27,23 @@ if [ -f "$private" ]; then
         exit 1
     fi
 fi
+echo "pre-push: format + lint (black, isort, flake8, mypy)…"
+python3 -m black --check -q src scripts test || {
+    echo "pre-push: black would reformat files — run: python3 -m black src scripts test" >&2
+    exit 1
+}
+python3 -m isort --check-only -q src scripts test || {
+    echo "pre-push: imports unsorted — run: python3 -m isort src scripts test" >&2
+    exit 1
+}
+python3 -m flake8 src scripts test || {
+    echo "pre-push: flake8 issues above" >&2
+    exit 1
+}
+python3 -m mypy src/dev_titles >/dev/null || {
+    echo "pre-push: mypy errors — run: python3 -m mypy src/dev_titles" >&2
+    exit 1
+}
 echo "pre-push: tests…"
 PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider -o addopts="" test >/dev/null 2>&1 || {
     echo "pre-push: tests FAILED — run: PYTHONPATH=src python3 -m pytest test" >&2

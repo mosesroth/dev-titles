@@ -1,32 +1,13 @@
 """Split from test_core: resegment tests (20)."""
 
+import pytest
 from helpers import _transcribe_json
 
 from dev_titles.config import spec_for
 from dev_titles.cue_builder import build_en_cues
-from dev_titles.eval import (
-    GembaMqmScorer,
-    QeResult,
-    QeScorer,
-    below_threshold_segments,
-    parse_gemba_mqm,
-    rank_engines,
-)
-from dev_titles.formats import read_vtt, write_srt, write_vtt
-from dev_titles.glossary import load
-from dev_titles.linguistics import get_joiner, is_repeated_text
 from dev_titles.model import Cue, Subtitle
-from dev_titles.segment import apply_kinsoku, break_lines, normalize_zh_punct
 from dev_titles.textwidth import display_width
 from dev_titles.transcribe import from_transcribe_json
-from dev_titles.translate import (
-    TranslationRequest,
-    Translator,
-    build_translate_prompt,
-    translate_segment,
-)
-from dev_titles.validate import validate_subtitle
-from dev_titles.validate.rules import validity_report
 
 
 def test_merge_en_to_sentences():
@@ -65,6 +46,7 @@ def test_resegment_distributes_time_and_fits_spec():
 
 
 def test_audit_word_diffs_classify_and_sheet(tmp_path):
+    pytest.importorskip("openpyxl")  # the .xlsx sheet needs the optional [xlsx] extra
     """audit module: substantive word-diffs (skip trivial/cue-only), conservative
     classify, and a verdict-labeled sheet."""
     from dev_titles.audit import classify, word_diffs, write_review_xlsx

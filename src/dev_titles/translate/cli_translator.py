@@ -37,7 +37,12 @@ def _resolve_binary() -> str:
 
 DEFAULT_BINARY = _resolve_binary()
 
-_KEY_OR_CLOUD = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
+_KEY_OR_CLOUD = (
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+)
 
 
 def isolation_mode(env=None) -> str:
@@ -52,7 +57,12 @@ def isolation_mode(env=None) -> str:
 def _default_runner(argv: list[str], prompt: str, timeout: float, env) -> str:
     # run from a neutral directory so a project's .claude/ or .mcp.json is never picked up
     proc = subprocess.run(
-        argv, input=prompt, capture_output=True, text=True, timeout=timeout, env=env,
+        argv,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
         cwd=tempfile.gettempdir(),
     )
     if proc.returncode != 0:

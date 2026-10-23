@@ -11,7 +11,7 @@ then accepts a rewrite only if it passes:
      Claude) — same meaning AND B preferred, with A/B order randomized against position bias;
   3. ratings — both judges rate current vs suggested line (no reference): a pairwise-accepted
      suggestion either rates worse is vetoed; a pairwise-rejected one every judge rates better is
-     rescued (scripts/gate_benchmark.py, gate_compare.py, gate_rescue.py).
+     rescued (scripts/eval/gate_benchmark.py, gate_compare.py, gate_rescue.py).
 Idempotent via <out>/editor_state.<lang>.json; every accepted edit is logged (before/after/issue)
 to editor_log.<lang>.json. Few-shot examples come from glossary/editor_examples.<lang>.jsonl —
 before->after pairs mined from human reviews (scripts/mine_review.py).
@@ -93,7 +93,9 @@ def _toks(s, rx):
 def guard_ok(old: str, new: str, max_growth: float = 1.15, slack: int = 3) -> bool:
     if not new or not new.strip():
         return False
-    if len(re.sub(r"\s", "", new)) > max(len(re.sub(r"\s", "", old)) * max_growth, len(old) + slack):
+    if len(re.sub(r"\s", "", new)) > max(
+        len(re.sub(r"\s", "", old)) * max_growth, len(old) + slack
+    ):
         return False
     for rx in (_LATIN, _NUM):
         if _toks(old, rx) - _toks(new, rx):
@@ -108,7 +110,9 @@ def load_examples(lang: str, path_tpl: str = "glossary/editor_examples.{lang}.js
     rows = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     # evaluation hold-out: when re-translating an already-reviewed video to measure the harness, its
     # own reviewed lines must not be in the prompt (SUBTITLE_HOLDOUT_VIDEOS=VideoA,VideoB)
-    held = {v.strip() for v in os.environ.get("SUBTITLE_HOLDOUT_VIDEOS", "").split(",") if v.strip()}
+    held = {
+        v.strip() for v in os.environ.get("SUBTITLE_HOLDOUT_VIDEOS", "").split(",") if v.strip()
+    }
     rows = [r for r in rows if r.get("video") not in held]
     return rows[:k]
 
@@ -134,9 +138,13 @@ def deterministic_hints(txt: str, lang: str, src: str = "") -> list[str]:
     if src:  # an English word in the line that the English sentence doesn't contain: a stray
         # fragment (a reviewer deleted a dangling 'LLM' left at a line end)
         low = src.lower()  # substring match: plurals (LLMs), compounds (website ⊃ web) are fine
-        stray = [w for w in _LATIN.findall(txt) if len(w) > 1 and w.lower().rstrip(".'’") not in low]
+        stray = [
+            w for w in _LATIN.findall(txt) if len(w) > 1 and w.lower().rstrip(".'’") not in low
+        ]
         if stray:
-            hints.append("English word(s) not in the English line: " + ", ".join(dict.fromkeys(stray)))
+            hints.append(
+                "English word(s) not in the English line: " + ", ".join(dict.fromkeys(stray))
+            )
     return hints
 
 
@@ -173,7 +181,11 @@ def _pairwise(judge, L, en, ctx, old, new, rng):
     if better == "tie" and d.get("same_meaning"):
         return False, "__tie__"
     # report the verdict in OUR terms (the judge's A/B labels were randomized)
-    verdict = ("prefers the suggestion" if new_wins else "prefers the current line" if better in ("A", "B") else "tie")
+    verdict = (
+        "prefers the suggestion"
+        if new_wins
+        else "prefers the current line" if better in ("A", "B") else "tie"
+    )
     if not d.get("same_meaning"):
         verdict += "; says the meaning differs"
     return bool(d.get("same_meaning")) and new_wins, verdict
@@ -200,8 +212,10 @@ def rate_pairs(cands, lang_name, judges, seed=29) -> dict:
     for c in cands:
         items += [(c[0].i, "o", c[0].src, c[0].txt), (c[0].i, "s", c[0].src, c[1])]
     random.Random(seed + len(items)).shuffle(items)
-    body = "\n\n".join(f"{n + 1}. EN: {en}\n   SUBTITLE: {t}" for n, (_, _, en, t) in enumerate(items))
-    out = {c[0].i: [] for c in cands}
+    body = "\n\n".join(
+        f"{n + 1}. EN: {en}\n   SUBTITLE: {t}" for n, (_, _, en, t) in enumerate(items)
+    )
+    out: dict = {c[0].i: [] for c in cands}
     for judge in judges:
         try:
             js = _parse_json_array(judge(RATE_PROMPT.format(L=lang_name, body=body)) or "")
@@ -220,13 +234,27 @@ def rate_pairs(cands, lang_name, judges, seed=29) -> dict:
     return out
 
 
-def _gate(items, *, invoke, judge, lang_name, by_i, normalize, rng, stats, log, changed, ctx_fn=None,
-          slack=3):
+def _gate(
+    items,
+    *,
+    invoke,
+    judge,
+    lang_name,
+    by_i,
+    normalize,
+    rng,
+    stats,
+    log,
+    changed,
+    ctx_fn=None,
+    slack=3,
+):
     """Accept editor suggestions [(rec, rewrite, issue)] in place through the measured gate: token/
     number guard -> pairwise second judge (randomized, tie -> other-family tie-break) -> both judges
     rate current vs suggested (no reference): VETO an accepted one either rates worse, RESCUE a
-    rejected one every judge rates better (gate benchmark 2026-10-18, scripts/gate_*.py)."""
-    cands, rejected = [], []
+    rejected one every judge rates better (gate benchmark 2026-10-18, scripts/eval/gate_*.py)."""
+    cands: list = []
+    rejected: list = []
     for r, new, issue in items:
         if not new or new == r.txt:
             continue
@@ -234,7 +262,9 @@ def _gate(items, *, invoke, judge, lang_name, by_i, normalize, rng, stats, log, 
         if not guard_ok(r.txt, new, slack=slack):
             stats["guard"] += 1
             continue
-        ctx = ctx_fn(r) if ctx_fn else " ".join(by_i[j].src for j in (r.i - 1, r.i + 1) if j in by_i)
+        ctx = (
+            ctx_fn(r) if ctx_fn else " ".join(by_i[j].src for j in (r.i - 1, r.i + 1) if j in by_i)
+        )
         try:
             ok, why = _pairwise(judge, lang_name, r.src, ctx, r.txt, new, rng)
             if not ok and why == "__tie__" and judge is not invoke:
@@ -259,8 +289,17 @@ def _gate(items, *, invoke, judge, lang_name, by_i, normalize, rng, stats, log, 
                 why = f"{why}; rescued: every judge rated it better"
             else:
                 stats["pair"] += 1
-        log.append({"i": r.i, "src": r.src, "before": r.txt, "after": new, "issue": issue,
-                    "why": why, "status": "accepted" if ok else "rejected"})
+        log.append(
+            {
+                "i": r.i,
+                "src": r.src,
+                "before": r.txt,
+                "after": new,
+                "issue": issue,
+                "why": why,
+                "status": "accepted" if ok else "rejected",
+            }
+        )
         if ok:
             r.txt = new
             changed.add(r.i)
@@ -303,14 +342,25 @@ def native_edit(
     terms = ", ".join(sorted({t for t in glossary_terms if t}))[:1500] or "(none)"
     judge = pair_judge or invoke
     rng = random.Random(seed)
-    changed, log = set(), []
-    stats = {"reviewed": 0, "flagged": 0, "accepted": 0, "guard": 0, "pair": 0, "veto": 0, "rescued": 0}
+    changed: set = set()
+    log: list = []
+    stats = {
+        "reviewed": 0,
+        "flagged": 0,
+        "accepted": 0,
+        "guard": 0,
+        "pair": 0,
+        "veto": 0,
+        "rescued": 0,
+    }
     for k in range(0, len(pending), batch):
         chunk = pending[k : k + batch]
         rows = []
         for n, r in enumerate(chunk, 1):
             hints = deterministic_hints(r.txt, lang, r.src)
-            who = f"[{speakers[r.i]}] " if speakers and r.i < len(speakers) and speakers[r.i] else ""
+            who = (
+                f"[{speakers[r.i]}] " if speakers and r.i < len(speakers) and speakers[r.i] else ""
+            )
             from .en_gloss import meaning_tag
 
             src = r.src + meaning_tag(r.i, meaning_notes)
@@ -337,8 +387,18 @@ def native_edit(
             except (TypeError, ValueError, IndexError):
                 continue
             items.append((r, (f.get("rewrite") or "").strip(), f.get("issue", "")))
-        _gate(items, invoke=invoke, judge=judge, lang_name=lang_name, by_i=by_i, normalize=normalize,
-              rng=rng, stats=stats, log=log, changed=changed)
+        _gate(
+            items,
+            invoke=invoke,
+            judge=judge,
+            lang_name=lang_name,
+            by_i=by_i,
+            normalize=normalize,
+            rng=rng,
+            stats=stats,
+            log=log,
+            changed=changed,
+        )
         logger(f"{lang}: native editor {min(k + batch, len(pending))}/{len(pending)} {stats}")
     for r in pending:
         state[_h(r.src)] = _h(r.txt)
@@ -392,7 +452,14 @@ def _reply_accept(judges, lang_name, exchange, who, en, old, new, rng) -> tuple[
         swap = rng.random() < 0.5
         a, b = (new, old) if swap else (old, new)
         try:
-            out = judge(REPLY_PAIR_PROMPT.format(L=lang_name, exchange=exchange, who=who, en=en, a=a, b=b)) or ""
+            out = (
+                judge(
+                    REPLY_PAIR_PROMPT.format(
+                        L=lang_name, exchange=exchange, who=who, en=en, a=a, b=b
+                    )
+                )
+                or ""
+            )
             m = re.search(r"\{.*\}", out, re.S)
             d = json.loads(m.group(0)) if m else {}
         except Exception:
@@ -422,31 +489,53 @@ def reply_edit(
     """Turn-boundary editor: at each speaker change, check that the new speaker's first lines read
     as a reply to the previous speaker (こちらこそ for reciprocal thanks, a reply "Brilliant." is not
     素晴らしい). Sentence-by-sentence translation and the general editor miss this (A/B 2026-10-20).
-    Suggestions go through the same measured gate as native_edit. Returns the set of changed indices."""
+    Suggestions go through the same measured gate as native_edit. Returns the set of changed indices.
+    """
     if not speakers:
         return set()
     recs = sorted(records, key=lambda r: r.i)
     by_i = {r.i: r for r in recs}
-    turns = [i for i in range(1, len(speakers)) if speakers[i] and speakers[i] != speakers[i - 1] and i in by_i]
+    turns = [
+        i
+        for i in range(1, len(speakers))
+        if speakers[i] and speakers[i] != speakers[i - 1] and i in by_i
+    ]
     sp = Path(state_path) if state_path else None
     state = json.loads(sp.read_text(encoding="utf-8")) if sp and sp.exists() else {}
 
     def key(i):
-        return _h("|".join(by_i[j].src + "\x00" + by_i[j].txt for j in range(i - window, i + window) if j in by_i))
+        return _h(
+            "|".join(
+                by_i[j].src + "\x00" + by_i[j].txt
+                for j in range(i - window, i + window)
+                if j in by_i
+            )
+        )
 
     todo = [i for i in turns if state.get(str(i)) != key(i)]
     if not todo:
         return set()
     judge = pair_judge or invoke
     rng = random.Random(seed)
-    changed, log = set(), []
-    stats = {"reviewed": 0, "flagged": 0, "accepted": 0, "guard": 0, "pair": 0, "veto": 0, "rescued": 0}
+    changed: set = set()
+    log: list = []
+    stats = {
+        "reviewed": 0,
+        "flagged": 0,
+        "accepted": 0,
+        "guard": 0,
+        "pair": 0,
+        "veto": 0,
+        "rescued": 0,
+    }
 
     def tag(j):
         return f"[{speakers[j]}]" if j < len(speakers) and speakers[j] else ""
 
     def ctx_fn(r):  # the exchange before the line, with who says what
-        return "\n".join(f"{tag(j)}: \"{by_i[j].src}\"" for j in range(r.i - window - 1, r.i) if j in by_i)
+        return "\n".join(
+            f'{tag(j)}: "{by_i[j].src}"' for j in range(r.i - window - 1, r.i) if j in by_i
+        )
 
     for k in range(0, len(todo), per_call):
         part = todo[k : k + per_call]
@@ -457,11 +546,15 @@ def reply_edit(
                 if j not in by_i:
                     continue
                 mark = ">> " if j >= i else "   "
-                lines.append(f"{mark}{tag(j)} (id {j}) EN: {by_i[j].src} | {lang_name}: {by_i[j].txt}")
+                lines.append(
+                    f"{mark}{tag(j)} (id {j}) EN: {by_i[j].src} | {lang_name}: {by_i[j].txt}"
+                )
                 if j >= i and speakers[j] == speakers[i]:
                     allowed[j] = by_i[j]
             blocks.append("\n".join(lines))
-        prompt = REPLY_PROMPT.format(L=lang_name, brief=brief or "(none)", examples="", items="\n\n".join(blocks))
+        prompt = REPLY_PROMPT.format(
+            L=lang_name, brief=brief or "(none)", examples="", items="\n\n".join(blocks)
+        )
         try:
             flags = _parse_json_array(invoke(prompt) or "")
         except Exception as e:
@@ -486,9 +579,17 @@ def reply_edit(
             # -> ありがとうございます) a meaning change; here every judge sees the exchange.
             ok, why = _reply_accept(judges, lang_name, ctx_fn(r), tag(r.i), r.src, r.txt, new, rng)
             new = normalize(new, r.src)
-            log.append({"i": r.i, "src": r.src, "before": r.txt, "after": new,
-                        "issue": "reply: " + f.get("issue", ""), "why": why,
-                        "status": "accepted" if ok else "rejected"})
+            log.append(
+                {
+                    "i": r.i,
+                    "src": r.src,
+                    "before": r.txt,
+                    "after": new,
+                    "issue": "reply: " + f.get("issue", ""),
+                    "why": why,
+                    "status": "accepted" if ok else "rejected",
+                }
+            )
             if ok:
                 r.txt = new
                 changed.add(r.i)
@@ -555,13 +656,17 @@ def video_description(out_dir) -> str:
     return out
 
 
-def video_brief(en_text: str, invoke, cache_path=None, description: str = "", chunk: int = 12000) -> str:
+def video_brief(
+    en_text: str, invoke, cache_path=None, description: str = "", chunk: int = 12000
+) -> str:
     """One paragraph of context shared by the translator and the editor. Built from the video's
     DESCRIPTION (authoritative for names/roles) plus the WHOLE transcript — long transcripts are
     summarized chunk by chunk first (map-reduce) so a late-introduced guest or topic isn't missed.
     Cached per out dir; regenerated when the description or transcript changes."""
     p = Path(cache_path) if cache_path else None
-    key = hashlib.sha1((description + "\x00" + en_text).encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+    key = hashlib.sha1(
+        (description + "\x00" + en_text).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
     if p and p.exists():
         txt = p.read_text(encoding="utf-8")
         if txt.startswith(f"# {key}\n"):
@@ -572,7 +677,10 @@ def video_brief(en_text: str, invoke, cache_path=None, description: str = "", ch
             notes = "\n".join((invoke(NOTES_PROMPT.format(text=t)) or "").strip() for t in parts)
         else:
             notes = en_text
-        brief = (invoke(BRIEF_PROMPT.format(description=description[:4000] or "(none)", text=notes)) or "").strip()
+        brief = (
+            invoke(BRIEF_PROMPT.format(description=description[:4000] or "(none)", text=notes))
+            or ""
+        ).strip()
     except Exception:
         brief = ""
     if p and brief:
@@ -636,13 +744,25 @@ def review_section(out_dir, lang) -> str:
     log = json.loads(lp.read_text(encoding="utf-8"))
     acc = [e for e in log if e.get("status", "accepted") == "accepted"]
     rej = [e for e in log if e.get("status") == "rejected"]
-    out = [f"- **Native editor:** {len(acc)} line(s) rewritten for naturalness"
-           + (f"; {len(rej)} suggestion(s) the second judge did not accept — your call:" if rej else ".")]
+    out = [
+        f"- **Native editor:** {len(acc)} line(s) rewritten for naturalness"
+        + (
+            f"; {len(rej)} suggestion(s) the second judge did not accept — your call:"
+            if rej
+            else "."
+        )
+    ]
     for e in rej[:30]:
         out.append(
-            "    - EN: " + e["src"][:140]
-            + "\n      current: " + e["before"]
-            + "\n      suggested: " + e["after"]
-            + "\n      editor: " + e.get("issue", "")[:120] + " | judge: " + e.get("why", "")[:80]
+            "    - EN: "
+            + e["src"][:140]
+            + "\n      current: "
+            + e["before"]
+            + "\n      suggested: "
+            + e["after"]
+            + "\n      editor: "
+            + e.get("issue", "")[:120]
+            + " | judge: "
+            + e.get("why", "")[:80]
         )
     return "\n".join(out) + "\n"

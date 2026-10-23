@@ -35,10 +35,13 @@ SENTENCES (id | text):
 Return ONLY a JSON array: [{{"id": n, "phrase": "<exact words>", "meaning": "<what it means here, max 15 words>"}}]; [] if none."""
 
 
-def meaning_notes(sents, invoke, cache_path=None, brief: str = "", batch: int = 60) -> dict[int, list[dict]]:
+def meaning_notes(
+    sents, invoke, cache_path=None, brief: str = "", batch: int = 60
+) -> dict[int, list[dict]]:
     """{sentence index: [{'phrase', 'meaning'}]} — cached by the sentence texts + brief."""
-    key = hashlib.sha1(("\x00".join(s.text for s in sents) + "\x01" + brief).encode("utf-8"),
-                       usedforsecurity=False).hexdigest()[:16]
+    key = hashlib.sha1(
+        ("\x00".join(s.text for s in sents) + "\x01" + brief).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
     p = Path(cache_path) if cache_path else None
     if p and p.exists():
         try:
@@ -53,8 +56,13 @@ def meaning_notes(sents, invoke, cache_path=None, brief: str = "", batch: int = 
         lo, hi = max(0, s0 - 3), min(len(sents), s0 + batch + 3)
         rows = "\n".join(f"{k} | {sents[k].text}" for k in range(lo, hi))
         try:
-            raw = invoke(PROMPT.format(brief=brief or "(none)", rows=rows, cap=max(2, (hi - lo) // 6))) or ""
-            found = json.JSONDecoder().raw_decode(raw[raw.index("["):])[0]
+            raw = (
+                invoke(
+                    PROMPT.format(brief=brief or "(none)", rows=rows, cap=max(2, (hi - lo) // 6))
+                )
+                or ""
+            )
+            found = json.JSONDecoder().raw_decode(raw[raw.index("[") :])[0]
         except (ValueError, json.JSONDecodeError, TypeError):
             continue
         except Exception:
@@ -71,8 +79,14 @@ def meaning_notes(sents, invoke, cache_path=None, brief: str = "", batch: int = 
                 continue  # the phrase must really be in that sentence
             notes.setdefault(k, []).append({"phrase": ph, "meaning": me})
     if p:
-        p.write_text(json.dumps({"key": key, "notes": {str(k): v for k, v in notes.items()}},
-                                ensure_ascii=False, indent=1), encoding="utf-8")
+        p.write_text(
+            json.dumps(
+                {"key": key, "notes": {str(k): v for k, v in notes.items()}},
+                ensure_ascii=False,
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
     return notes
 
 
@@ -88,4 +102,8 @@ def meaning_note(i: int, notes) -> str:
 def meaning_tag(i: int, notes) -> str:
     """Short inline form for the native editor's line table."""
     items = (notes or {}).get(i) or (notes or {}).get(str(i)) or []
-    return " [means: " + "; ".join(f'{n["phrase"]} = {n["meaning"]}' for n in items) + "]" if items else ""
+    return (
+        " [means: " + "; ".join(f'{n["phrase"]} = {n["meaning"]}' for n in items) + "]"
+        if items
+        else ""
+    )

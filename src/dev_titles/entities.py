@@ -46,13 +46,17 @@ _OWN_BRANDS = re.compile(r"^$")  # set your own brands here; the glossary covers
 
 
 def _caps(text: str, n: int = 40) -> str:
-    c = Counter(m.group(0) for m in re.finditer(r"\b[A-Z][a-zA-Z0-9]+(?: [A-Z][a-zA-Z0-9]+)*\b", text))
+    c = Counter(
+        m.group(0) for m in re.finditer(r"\b[A-Z][a-zA-Z0-9]+(?: [A-Z][a-zA-Z0-9]+)*\b", text)
+    )
     return ", ".join(f"{k} ({v})" for k, v in c.most_common(n) if v >= 2)
 
 
 def names_policy(en_text: str, invoke, cache_path=None, brief: str = "") -> dict:
     """{'companies': [...], 'ordinary_products': [{'name', 'ja', 'zh-Hans'}]} — {} on failure."""
-    key = hashlib.sha1((brief + "\x00" + en_text).encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+    key = hashlib.sha1(
+        (brief + "\x00" + en_text).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
     p = Path(cache_path) if cache_path else None
     if p and p.exists():
         try:
@@ -62,18 +66,33 @@ def names_policy(en_text: str, invoke, cache_path=None, brief: str = "") -> dict
         except (json.JSONDecodeError, OSError):
             pass
     try:
-        out = invoke(PROMPT.format(brief=brief or "(none)", caps=_caps(en_text) or "(none)", text=en_text[:6000])) or ""
+        out = (
+            invoke(
+                PROMPT.format(
+                    brief=brief or "(none)", caps=_caps(en_text) or "(none)", text=en_text[:6000]
+                )
+            )
+            or ""
+        )
         m = re.search(r"\{.*\}", out, re.S)
         pol = json.loads(m.group(0)) if m else {}
     except Exception:
         pol = {}
-    companies = [c.strip() for c in pol.get("companies", []) if isinstance(c, str) and c.strip()
-                 and not _OWN_BRANDS.match(c.strip())]
-    products = [x for x in pol.get("ordinary_products", []) if isinstance(x, dict) and x.get("name")
-                and not _OWN_BRANDS.match(str(x["name"]))]
+    companies = [
+        c.strip()
+        for c in pol.get("companies", [])
+        if isinstance(c, str) and c.strip() and not _OWN_BRANDS.match(c.strip())
+    ]
+    products = [
+        x
+        for x in pol.get("ordinary_products", [])
+        if isinstance(x, dict) and x.get("name") and not _OWN_BRANDS.match(str(x["name"]))
+    ]
     pol = {"companies": companies, "ordinary_products": products}
     if p:
-        p.write_text(json.dumps({"key": key, "policy": pol}, ensure_ascii=False, indent=1), encoding="utf-8")
+        p.write_text(
+            json.dumps({"key": key, "policy": pol}, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
     return pol
 
 
@@ -112,8 +131,10 @@ def apply_policy(video_vocab: dict | None, policy: dict, langs=("ja", "zh-Hans")
 # ---- Official renderings from the partner's own website, locked in glossary/partners.yaml ----
 
 PARTNERS_PATH = "glossary/partners.yaml"
-_LANG_HINT = {"ja": ("日本語", "Japanese", ("/ja", "ja-jp", "/jp", "jp/", "ja_jp")),
-              "zh-Hans": ("中文", "Simplified Chinese", ("/zh", "zh-cn", "/cn", "cn/", "zh_cn", "zh-hans"))}
+_LANG_HINT = {
+    "ja": ("日本語", "Japanese", ("/ja", "ja-jp", "/jp", "jp/", "ja_jp")),
+    "zh-Hans": ("中文", "Simplified Chinese", ("/zh", "zh-cn", "/cn", "cn/", "zh_cn", "zh-hans")),
+}
 FIND = """This text is from {url}, a page on {company}'s own website in {L}. How does this page write the
 {company} product called "{product}" in {L}? Use ONLY this page: if it does not mention that product,
 answer null. Answer ONLY JSON: {{"rendering": "<exactly as written on the page>" | null, "quote": "<the exact
@@ -140,21 +161,30 @@ def load_partners(path=PARTNERS_PATH) -> dict:
 def save_partners(partners: dict, path=PARTNERS_PATH) -> None:
     import yaml
 
-    head = ("# Partner product names with their OFFICIAL ja / zh-Hans renderings, found on the partner's own\n"
-            "# website by the pre-run names step and locked here, with the source page. 'name' = the company's\n"
-            "# own localized name (null = none on its site -> Latin). Edit by hand to correct; an entry here is\n"
-            "# never looked up again.\n")
-    Path(path).write_text(head + yaml.safe_dump({"partners": partners}, allow_unicode=True, sort_keys=True),
-                          encoding="utf-8")
+    head = (
+        "# Partner product names with their OFFICIAL ja / zh-Hans renderings, found on the partner's own\n"
+        "# website by the pre-run names step and locked here, with the source page. 'name' = the company's\n"
+        "# own localized name (null = none on its site -> Latin). Edit by hand to correct; an entry here is\n"
+        "# never looked up again.\n"
+    )
+    Path(path).write_text(
+        head + yaml.safe_dump({"partners": partners}, allow_unicode=True, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def official_rendering(company, product, lang, *, web_search, web_fetch, invoke, max_pages=4):
     """(rendering, url) from the company's OWN site in `lang`, or (None, None). A page counts only if its
-    domain contains the company's name, and the rendering only if the quoted text is really on the page."""
+    domain contains the company's name, and the rendering only if the quoted text is really on the page.
+    """
     hint, L, paths = _LANG_HINT[lang]
     slug = _slug(company)
     urls = []
-    for q in (f'"{company}" "{product}" {hint}', f"{company} {product} {hint}", f"{company} {hint}"):
+    for q in (
+        f'"{company}" "{product}" {hint}',
+        f"{company} {product} {hint}",
+        f"{company} {hint}",
+    ):
         try:
             urls += [u for u in web_search(q) if u not in urls]
         except Exception:
@@ -166,13 +196,22 @@ def official_rendering(company, product, lang, *, web_search, web_fetch, invoke,
             text = web_fetch(u)
         except Exception:
             continue
-        if not text or (lang == "ja" and not re.search(r"[ぁ-んァ-ン]", text)) or (
-            lang == "zh-Hans" and (not re.search(r"[一-鿿]", text) or re.search(r"[ぁ-ん]", text))
+        if (
+            not text
+            or (lang == "ja" and not re.search(r"[ぁ-んァ-ン]", text))
+            or (
+                lang == "zh-Hans"
+                and (not re.search(r"[一-鿿]", text) or re.search(r"[ぁ-ん]", text))
+            )
         ):
             continue  # not a page in that language
         try:
-            m = re.search(r"\{.*\}", invoke(FIND.format(url=u, company=company, L=L, product=product,
-                                                       text=text[:12000])) or "", re.S)
+            m = re.search(
+                r"\{.*\}",
+                invoke(FIND.format(url=u, company=company, L=L, product=product, text=text[:12000]))
+                or "",
+                re.S,
+            )
             d = json.loads(m.group(0)) if m else {}
         except Exception:
             d = {}
@@ -196,7 +235,10 @@ def official_company_name(company, lang, *, web_search, web_fetch, invoke, max_p
     hint, L, paths = _LANG_HINT[lang]
     slug = _slug(company)
     urls = []
-    for q in (f"{company} {hint}", f"{company} {'官网' if lang.startswith('zh') else '公式サイト'}"):
+    for q in (
+        f"{company} {hint}",
+        f"{company} {'官网' if lang.startswith('zh') else '公式サイト'}",
+    ):
         try:
             urls += [u for u in web_search(q) if u not in urls]
         except Exception:
@@ -208,12 +250,21 @@ def official_company_name(company, lang, *, web_search, web_fetch, invoke, max_p
             text = web_fetch(u)
         except Exception:
             continue
-        if not text or (lang == "ja" and not re.search(r"[ぁ-んァ-ン]", text)) or (
-            lang == "zh-Hans" and (not re.search(r"[一-鿿]", text) or re.search(r"[ぁ-ん]", text))
+        if (
+            not text
+            or (lang == "ja" and not re.search(r"[ぁ-んァ-ン]", text))
+            or (
+                lang == "zh-Hans"
+                and (not re.search(r"[一-鿿]", text) or re.search(r"[ぁ-ん]", text))
+            )
         ):
             continue
         try:
-            m = re.search(r"\{.*\}", invoke(NAME.format(url=u, company=company, L=L, text=text[:12000])) or "", re.S)
+            m = re.search(
+                r"\{.*\}",
+                invoke(NAME.format(url=u, company=company, L=L, text=text[:12000])) or "",
+                re.S,
+            )
             d = json.loads(m.group(0)) if m else {}
         except Exception:
             d = {}
@@ -221,14 +272,28 @@ def official_company_name(company, lang, *, web_search, web_fetch, invoke, max_p
         # the localized name must be how the site BRANDS itself, not a one-off reading guide:
         # used at least as often as the Latin name on the page (e.g. Latin 23x vs a local reading 1x)
         latin_n = len(re.findall(re.escape(company), text, re.I))
-        if (r and quote and r in quote and r.lower() != company.lower()
-                and re.sub(r"\s", "", quote) in re.sub(r"\s", "", text) and text.count(r) >= max(latin_n, 1)):
+        if (
+            r
+            and quote
+            and r in quote
+            and r.lower() != company.lower()
+            and re.sub(r"\s", "", quote) in re.sub(r"\s", "", text)
+            and text.count(r) >= max(latin_n, 1)
+        ):
             return r, u
     return None, None
 
 
-def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-Hans"),
-                     path=PARTNERS_PATH, logger=print) -> dict:
+def resolve_official(
+    policy,
+    *,
+    web_search,
+    web_fetch,
+    invoke,
+    langs=("ja", "zh-Hans"),
+    path=PARTNERS_PATH,
+    logger=print,
+) -> dict:
     """Replace the policy's model-chosen product renderings with LOCKED official ones: from
     partners.yaml if known, else looked up on the partner's site and locked there. Products with no
     official rendering keep the model's choice, marked unverified."""
@@ -242,10 +307,14 @@ def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-
                 if (entry[lang] or {}).get("rendering"):
                     names.setdefault(company, {})[lang] = entry[lang]["rendering"]
                 continue
-            r, url = official_company_name(company, lang, web_search=web_search, web_fetch=web_fetch,
-                                           invoke=invoke)
-            entry[lang] = {"rendering": r, "source": url} if r else {"rendering": None,
-                                                                    "source": "no localized name on own site"}
+            r, url = official_company_name(
+                company, lang, web_search=web_search, web_fetch=web_fetch, invoke=invoke
+            )
+            entry[lang] = (
+                {"rendering": r, "source": url}
+                if r
+                else {"rendering": None, "source": "no localized name on own site"}
+            )
             changed = True
             if r:
                 names.setdefault(company, {})[lang] = r
@@ -262,14 +331,17 @@ def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-
                 prod[lang] = locked["rendering"]
                 prod.setdefault("source", {})[lang] = locked.get("source", "partners.yaml")
                 continue
-            r, url = official_rendering(company, name, lang, web_search=web_search, web_fetch=web_fetch,
-                                        invoke=invoke)
+            r, url = official_rendering(
+                company, name, lang, web_search=web_search, web_fetch=web_fetch, invoke=invoke
+            )
             if r:
                 prod[lang] = r
                 prod.setdefault("source", {})[lang] = url
                 entry[lang] = {"rendering": r, "source": url}
                 changed = True
-                logger(f"names policy: official {lang} rendering of {company} '{name}' = {r} ({url}) — locked")
+                logger(
+                    f"names policy: official {lang} rendering of {company} '{name}' = {r} ({url}) — locked"
+                )
             else:
                 prod.setdefault("source", {})[lang] = "unverified (no official page found)"
         if not entry:
@@ -277,5 +349,7 @@ def resolve_official(policy, *, web_search, web_fetch, invoke, langs=("ja", "zh-
         if not partners[company].get("products"):
             partners[company].pop("products", None)
     if changed:
-        save_partners({k: v for k, v in partners.items() if v.get("products") or v.get("name")}, path)
+        save_partners(
+            {k: v for k, v in partners.items() if v.get("products") or v.get("name")}, path
+        )
     return policy

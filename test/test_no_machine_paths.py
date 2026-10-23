@@ -20,11 +20,30 @@ def _string_literals(path):
     for i, t in enumerate(toks):
         if t.type != tokenize.STRING:
             continue
-        prev = next((p for p in reversed(toks[:i]) if p.type not in (tokenize.NL, tokenize.NEWLINE,
-                     tokenize.INDENT, tokenize.DEDENT, tokenize.COMMENT)), None)
-        if prev is None or (prev.type == tokenize.OP and prev.string == ":") and t.string.startswith(('"""', "'''")):
+        prev = next(
+            (
+                p
+                for p in reversed(toks[:i])
+                if p.type
+                not in (
+                    tokenize.NL,
+                    tokenize.NEWLINE,
+                    tokenize.INDENT,
+                    tokenize.DEDENT,
+                    tokenize.COMMENT,
+                )
+            ),
+            None,
+        )
+        if (
+            prev is None
+            or (prev.type == tokenize.OP and prev.string == ":")
+            and t.string.startswith(('"""', "'''"))
+        ):
             continue  # module/function/class docstring
-        if t.string.startswith(('"""', "'''")) and (prev is None or prev.type in (tokenize.NEWLINE, tokenize.INDENT)):
+        if t.string.startswith(('"""', "'''")) and (
+            prev is None or prev.type in (tokenize.NEWLINE, tokenize.INDENT)
+        ):
             continue
         yield t.start[0], t.string.lstrip("rbfuRBFU")
 

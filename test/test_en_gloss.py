@@ -1,4 +1,5 @@
 """Meaning notes: idioms / ambiguous phrases resolved once in the English and attached per sentence."""
+
 import json
 
 from dev_titles.en_gloss import meaning_note, meaning_notes, meaning_tag
@@ -11,8 +12,12 @@ def _sents(*texts):
 
 def test_notes_kept_only_when_the_phrase_is_in_that_sentence(tmp_path):
     s = _sents("Bring it home.", "And there are two ways of having local models.")
-    fake = lambda _: json.dumps([{"id": 0, "phrase": "Bring it home", "meaning": "make it concrete"},
-                                 {"id": 1, "phrase": "boil the ocean", "meaning": "invented"}])
+    fake = lambda _: json.dumps(
+        [
+            {"id": 0, "phrase": "Bring it home", "meaning": "make it concrete"},
+            {"id": 1, "phrase": "boil the ocean", "meaning": "invented"},
+        ]
+    )
     n = meaning_notes(s, fake, tmp_path / "mn.json")
     assert list(n) == [0] and n[0][0]["meaning"] == "make it concrete"
     assert meaning_notes(s, lambda _: 1 / 0, tmp_path / "mn.json") == n  # cached

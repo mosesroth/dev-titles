@@ -53,11 +53,11 @@ def wrap2(text: str, max_cpl: int = 42) -> list[str]:
         return [text]
     best = None
     for i, ch in enumerate(text):
-        if ch == " " and len(text[:i]) <= max_cpl and len(text[i + 1:]) <= max_cpl:
-            score = abs(len(text[:i]) - len(text[i + 1:]))
+        if ch == " " and len(text[:i]) <= max_cpl and len(text[i + 1 :]) <= max_cpl:
+            score = abs(len(text[:i]) - len(text[i + 1 :]))
             if best is None or score < best[0]:
                 best = (score, i)
-    return [text[:best[1]], text[best[1] + 1:]] if best else [text]
+    return [text[: best[1]], text[best[1] + 1 :]] if best else [text]
 
 
 def speech_style(en, invoke, title: str = "", cache_path=None, override: str | None = None) -> dict:
@@ -69,12 +69,18 @@ def speech_style(en, invoke, title: str = "", cache_path=None, override: str | N
         return json.loads(p.read_text(encoding="utf-8"))
     text = " ".join(" ".join(c.lines) for c in en.cues)[:4000]
     try:
-        m = re.search(r"\{.*?\}", invoke(STYLE.format(title=title or "(none)", text=text)) or "", re.S)
+        m = re.search(
+            r"\{.*?\}", invoke(STYLE.format(title=title or "(none)", text=text)) or "", re.S
+        )
         d = json.loads(m.group(0)) if m else {}
     except Exception:
         d = {}
     style = d.get("style") if d.get("style") in ("scripted", "unscripted") else "unscripted"
-    out = {"style": style, "why": d.get("why", "classifier failed — defaulting to clean-read"), "source": "llm"}
+    out = {
+        "style": style,
+        "why": d.get("why", "classifier failed — defaulting to clean-read"),
+        "source": "llm",
+    }
     if p:
         p.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
@@ -88,10 +94,12 @@ def clean_read(en, invoke, batch: int = 30):
     cues = out.cues
     applied, rejected = [], 0
     for s in range(0, len(cues), batch):
-        rows = "\n".join(f"{k} | {' '.join(cues[k].lines)}" for k in range(s, min(s + batch, len(cues))))
+        rows = "\n".join(
+            f"{k} | {' '.join(cues[k].lines)}" for k in range(s, min(s + batch, len(cues)))
+        )
         raw = invoke(CLEAN.format(rows=rows)) or ""
         try:
-            edits = json.JSONDecoder().raw_decode(raw[raw.index("["):])[0]
+            edits = json.JSONDecoder().raw_decode(raw[raw.index("[") :])[0]
         except (ValueError, json.JSONDecodeError):
             continue
         for e in edits:

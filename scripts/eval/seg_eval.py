@@ -10,7 +10,7 @@ Metrics (character positions in a whitespace-free stream, mapped between the two
   cue-break F1 vs the reviewer   line-break F1 vs the reviewer
   Latin name split across a cue/line   cues under 3 s   validation err-cues
 
-  PYTHONPATH=src python3 scripts/seg_eval.py --live-dir output/_live_ja_20261019 [--lang ja]
+  PYTHONPATH=src python3 scripts/eval/seg_eval.py --live-dir output/_live_ja_20261019 [--lang ja]
       [--delivered output/FINAL_SUBTITLES] [--ticket output/ticket] [--baseline]
 --baseline scores the delivered files as they are (no re-segmentation).
 """
@@ -84,7 +84,9 @@ def main():
     ap.add_argument("--ticket", default="output/ticket")
     ap.add_argument("--glossary", default="glossary/glossary.yaml")
     ap.add_argument("--baseline", action="store_true")
-    ap.add_argument("--from-cache", action="store_true", help="hypothesis text = cached machine translations")
+    ap.add_argument(
+        "--from-cache", action="store_true", help="hypothesis text = cached machine translations"
+    )
     a = ap.parse_args()
     spec = spec_for(a.lang)
     g = load_glossary(a.glossary)
@@ -101,6 +103,7 @@ def main():
             en = _read_any(str(Path(a.ticket) / v / "en.vtt"), "en")
             if a.from_cache:  # machine translations with their own punctuation/spaces intact
                 import json
+
                 recs = {}
                 for l in open(Path(a.ticket) / v / "cache.jsonl", encoding="utf-8"):
                     if l.strip():
@@ -116,7 +119,9 @@ def main():
         rs, rcb, rlb = stream(ref)
         # map hypothesis positions onto the reference stream (texts differ where she reworded)
         m = {}
-        for i1, j1, n in difflib.SequenceMatcher(None, hs, rs, autojunk=False).get_matching_blocks():
+        for i1, j1, n in difflib.SequenceMatcher(
+            None, hs, rs, autojunk=False
+        ).get_matching_blocks():
             for k in range(n + 1):
                 m[i1 + k] = j1 + k
         hcb_r = {m[p] for p in hcb if p in m}
@@ -125,18 +130,32 @@ def main():
         ltp, lh, lr, _ = f1(hlb_r, rlb)
         sub = Subtitle(a.lang, list(hyp)).renumber()
         rep = validity_report(sub, False)
-        row = dict(ctp=ctp, ch=ch, cr=cr, ltp=ltp, lh=lh, lr=lr, lat=latin_splits(hyp), cues=len(hyp),
-                   short=sum(c.end - c.start < 3 for c in hyp), err=rep["cues_with_errors"])
+        row = dict(
+            ctp=ctp,
+            ch=ch,
+            cr=cr,
+            ltp=ltp,
+            lh=lh,
+            lr=lr,
+            lat=latin_splits(hyp),
+            cues=len(hyp),
+            short=sum(c.end - c.start < 3 for c in hyp),
+            err=rep["cues_with_errors"],
+        )
         for k in tot:
             tot[k] += row[k]
+
     def F(tp, h, r):
         p, q = tp / max(h, 1), tp / max(r, 1)
         return 2 * p * q / max(p + q, 1e-9)
-    print(f"{'baseline (delivered)' if a.baseline else 'current harness'}: "
-          f"cue-break F1 {F(tot['ctp'], tot['ch'], tot['cr']):.3f} (ours {tot['ch']} / hers {tot['cr']})  "
-          f"line-break F1 {F(tot['ltp'], tot['lh'], tot['lr']):.3f}  "
-          f"Latin splits {tot['lat']}  cues {tot['cues']}  <3s {tot['short'] / max(tot['cues'], 1):.0%}  "
-          f"err-cues {tot['err']}")
+
+    print(
+        f"{'baseline (delivered)' if a.baseline else 'current harness'}: "
+        f"cue-break F1 {F(tot['ctp'], tot['ch'], tot['cr']):.3f} (ours {tot['ch']} / hers {tot['cr']})  "
+        f"line-break F1 {F(tot['ltp'], tot['lh'], tot['lr']):.3f}  "
+        f"Latin splits {tot['lat']}  cues {tot['cues']}  <3s {tot['short'] / max(tot['cues'], 1):.0%}  "
+        f"err-cues {tot['err']}"
+    )
 
 
 if __name__ == "__main__":

@@ -10,4 +10,4 @@ model/region/account details are pinned for your deployment. The deterministic c
 (config, model, segment, validate, glossary, formats) is implemented.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

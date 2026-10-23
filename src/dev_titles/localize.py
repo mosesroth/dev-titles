@@ -122,7 +122,8 @@ def zh_list_separators(txt: str, src: str | None) -> str:
     """zh: an English LIST of Latin names ("JavaScript, TypeScript, ReScript, Java…") that the
     target ran together with spaces or nothing ('JavaScriptTypeScriptReScript') gets 、 between the
     items — a run-on list read as one name and was flagged by native reviewers. Only items that
-    appear in the English list, only when >=3 of them sit adjacent with nothing but spaces between."""
+    appear in the English list, only when >=3 of them sit adjacent with nothing but spaces between.
+    """
     if not src or not txt or src.count(",") < 2:
         return txt
     items = []
@@ -136,7 +137,11 @@ def zh_list_separators(txt: str, src: str | None) -> str:
 
     def fix(m):
         parts = re.findall(alt, m.group(0))
-        return "、".join(parts) if "".join(parts).replace(" ", "") == m.group(0).replace(" ", "") else m.group(0)
+        return (
+            "、".join(parts)
+            if "".join(parts).replace(" ", "") == m.group(0).replace(" ", "")
+            else m.group(0)
+        )
 
     return run.sub(fix, txt)
 
@@ -248,7 +253,8 @@ def edit_fix(invoke, src: str, cur: str, miss: str, tgt_lang_name: str) -> str:
 def _with_brief(transcript: str, video_vocab: dict | None) -> str:
     """Prefix the full-transcript context with the per-video brief (speakers, roles, topic,
     context-dependent jargon) so a line like "we don't have product" is read as the tech-industry
-    'product (management) team', not 'no product'. The brief is runtime-only (video_vocab['brief'])."""
+    'product (management) team', not 'no product'. The brief is runtime-only (video_vocab['brief']).
+    """
     brief = (video_vocab or {}).get("brief", "")
     return f"VIDEO BRIEF: {brief}\n\nTRANSCRIPT: {transcript}" if brief else transcript
 
@@ -313,7 +319,11 @@ def keep_latin_terms(glossary, video_vocab, lang: str = "") -> list[str]:
                 + list(video_vocab.get("names", []))
                 # speakers' names from the speaker labels ('Moses (host)' -> 'Moses'): a host
                 # named only in the brief was auto-pinned to katakana (モーゼス) by the term-pin pass
-                + [re.sub(r"\s*\(.*?\)", "", x).strip() for x in set(video_vocab.get("speakers") or []) if x]
+                + [
+                    re.sub(r"\s*\(.*?\)", "", x).strip()
+                    for x in set(video_vocab.get("speakers") or [])
+                    if x
+                ]
             )
             if not _glossary_translates(t)
         ]
@@ -524,6 +534,7 @@ def translate_subtitle(
     _spk = _speakers_for(sents, video_vocab)
     from .en_gloss import meaning_note
     from .speakers import speaker_note
+
     logger(f"{lang}: {len(en.cues)} EN cues -> {len(sents)} sentences")
     cues: list = []
     issues: list[EnforcementIssue] = []
@@ -592,7 +603,11 @@ def translate_subtitle(
             last_exc: Exception | None = None
             for _attempt in range(3):
                 try:
-                    _ctx_i = ctx + speaker_note(i, _spk) + meaning_note(i, (video_vocab or {}).get("meaning_notes"))
+                    _ctx_i = (
+                        ctx
+                        + speaker_note(i, _spk)
+                        + meaning_note(i, (video_vocab or {}).get("meaning_notes"))
+                    )
                     txt, iss = translate_segment(
                         translator,
                         g,
@@ -679,8 +694,10 @@ def translate_subtitle(
 
     _sync = sync_report(cues, en.cues)
     if _sync["drifted"]:
-        logger(f"{lang}: WARNING out of sync with the speech — median {_sync['median']} s, "
-               f"{_sync['far_share']:.0%} of name anchors >3 s off (see validate/sync.py)")
+        logger(
+            f"{lang}: WARNING out of sync with the speech — median {_sync['median']} s, "
+            f"{_sync['far_share']:.0%} of name anchors >3 s off (see validate/sync.py)"
+        )
     logger(
         f"{lang}: DONE {len(cues)} cues, {rep['cues_with_errors']} err-cues, "
         f"{sum(1 for x in issues if x.kind == 'missing')} missing"
@@ -846,8 +863,11 @@ def make_retranslate(
         from .en_gloss import meaning_note
         from .speakers import speaker_note
 
-        _ctx_i = (ctx + speaker_note(rec.i, _speakers_for(sents, video_vocab))
-                  + meaning_note(rec.i, (video_vocab or {}).get("meaning_notes")))
+        _ctx_i = (
+            ctx
+            + speaker_note(rec.i, _speakers_for(sents, video_vocab))
+            + meaning_note(rec.i, (video_vocab or {}).get("meaning_notes"))
+        )
         txt, iss = translate_segment(
             translator,
             g,
@@ -914,7 +934,12 @@ def _subtitle_from_records(
         reflow = None
 
     cues = build_target_cues(
-        en, sents, cjk_texts, spec, keep_together=keep_together, reflow=reflow,
+        en,
+        sents,
+        cjk_texts,
+        spec,
+        keep_together=keep_together,
+        reflow=reflow,
         speakers=_speakers_for(sents, video_vocab),
     )
     if rc_path is not None and rc:
@@ -1004,7 +1029,8 @@ def invalidate_cache(
 
 def localize_en(*args, logger=_noop, **kwargs):
     """Localize an EN subtitle into each target language, SERIALIZED behind the LLM lock
-    (llm_serialize_lock) so concurrent runs queue instead of throttling Bedrock. Thin wrapper over _localize_en_impl; see it for the full pipeline."""
+    (llm_serialize_lock) so concurrent runs queue instead of throttling Bedrock. Thin wrapper over _localize_en_impl; see it for the full pipeline.
+    """
     with llm_serialize_lock(logger):
         return _localize_en_impl(*args, logger=logger, **kwargs)
 
@@ -1035,8 +1061,8 @@ def _localize_en_impl(
     exact-match verbatim reuse + series-specific fuzzy exemplars (falls back to it for
     the exemplar bank when `exemplar_bank_for` isn't given). Reference-free translation
     QE runs per language (deterministic always; a calibrated-DQF LLM MQM judge when `qe_judge`)."""
-    from .translation_qe import build_judges, incremental_review, load_qe_state
     from .condense import load_originals, mark_processed
+    from .translation_qe import build_judges, incremental_review, load_qe_state
     from .translation_qe import qe_repair as _qe_repair
     from .translation_qe import rescore_after_repair, save_qe_state, translation_suspects
 
@@ -1057,9 +1083,12 @@ def _localize_en_impl(
 
         try:
             _spk_all = label_speakers(
-                merge_en_to_sentences(en), qe_invoke,
-                (_od / "speakers.json") if _od else None, brief=_brief or "",
-                raw_path=(_od / "raw.json") if _od else None, logger=logger,
+                merge_en_to_sentences(en),
+                qe_invoke,
+                (_od / "speakers.json") if _od else None,
+                brief=_brief or "",
+                raw_path=(_od / "raw.json") if _od else None,
+                logger=logger,
             )
         except Exception as e:  # never sink a run on speaker labeling
             logger(f"speaker labeling skipped ({type(e).__name__})")
@@ -1070,21 +1099,29 @@ def _localize_en_impl(
         from .en_gloss import meaning_notes
 
         try:
-            _mn = meaning_notes(merge_en_to_sentences(en), qe_invoke,
-                                (_od / "meaning_notes.json") if _od else None, brief=_brief or "")
+            _mn = meaning_notes(
+                merge_en_to_sentences(en),
+                qe_invoke,
+                (_od / "meaning_notes.json") if _od else None,
+                brief=_brief or "",
+            )
         except Exception as e:  # never sink a run on it
             logger(f"meaning notes skipped ({type(e).__name__})")
             _mn = {}
         if _mn:
             video_vocab = {**(video_vocab or {}), "meaning_notes": _mn}
-            logger(f"meaning notes: {sum(len(v) for v in _mn.values())} phrase(s) resolved for the translators")
+            logger(
+                f"meaning notes: {sum(len(v) for v in _mn.values())} phrase(s) resolved for the translators"
+            )
         # names policy: partner companies stay Latin; ordinary-word products get ONE rendering
         from .entities import apply_policy, names_policy
 
         try:
             _pol = names_policy(
-                " ".join(c.text for c in en.cues), qe_invoke,
-                (_od / "entities.json") if _od else None, brief=_brief or "",
+                " ".join(c.text for c in en.cues),
+                qe_invoke,
+                (_od / "entities.json") if _od else None,
+                brief=_brief or "",
             )
         except Exception as e:  # never sink a run on it
             logger(f"names policy skipped ({type(e).__name__})")
@@ -1096,8 +1133,14 @@ def _localize_en_impl(
                 from .search import web_search
                 from .vocab_prep import http_fetch
 
-                _pol = resolve_official(_pol, web_search=web_search, web_fetch=http_fetch,
-                                        invoke=qe_invoke, langs=langs, logger=logger)
+                _pol = resolve_official(
+                    _pol,
+                    web_search=web_search,
+                    web_fetch=http_fetch,
+                    invoke=qe_invoke,
+                    langs=langs,
+                    logger=logger,
+                )
             except Exception as e:
                 logger(f"official-name lookup skipped ({type(e).__name__})")
         if _pol.get("companies") or _pol.get("ordinary_products"):
@@ -1185,8 +1228,11 @@ def _localize_en_impl(
             _reg = _st.get("register_conversational" if conversational else "register", "")
             _terms = [
                 t.translations.get(lang, "")
-                for t in effective_glossary(glossary, video_vocab, conversational, lang=lang)[0].terms
-                if t.enforce == "hard" and t.source.lower() in " ".join(r.src for r in records).lower()
+                for t in effective_glossary(glossary, video_vocab, conversational, lang=lang)[
+                    0
+                ].terms
+                if t.enforce == "hard"
+                and t.source.lower() in " ".join(r.src for r in records).lower()
             ]
             _ech = native_edit(
                 records,
@@ -1210,10 +1256,17 @@ def _localize_en_impl(
                 from .editor import reply_edit
 
                 _rch = reply_edit(
-                    records, qe_invoke, lang, _LANG_NAME.get(lang, lang), video_vocab["speakers"],
-                    normalize=_normalizer(lang, conversational), pair_judge=qe_second_judge,
+                    records,
+                    qe_invoke,
+                    lang,
+                    _LANG_NAME.get(lang, lang),
+                    (video_vocab or {})["speakers"],
+                    normalize=_normalizer(lang, conversational),
+                    pair_judge=qe_second_judge,
                     brief=(video_vocab or {}).get("brief", ""),
-                    state_path=Path(cache_path).parent / f"reply_state.{lang}.json" if cache_path else None,
+                    state_path=(
+                        Path(cache_path).parent / f"reply_state.{lang}.json" if cache_path else None
+                    ),
                     logger=logger,
                 )
                 if _rch:

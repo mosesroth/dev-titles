@@ -1,4 +1,5 @@
 """Clean-read of unscripted EN: deletions / punctuation only; scripted videos are left alone."""
+
 import json
 
 from dev_titles.en_cleanread import clean_read, deletions_only, speech_style, wrap2
@@ -12,14 +13,18 @@ def _en(*texts):
 def test_deletions_only_guard():
     assert deletions_only("the standard, in the, in the industry", "the standard in the industry")
     assert deletions_only("and, you stay, hooks.", "And you stay, hooks.")
-    assert not deletions_only("we like moving with full speed", "we're moving at full speed")  # reworded
+    assert not deletions_only(
+        "we like moving with full speed", "we're moving at full speed"
+    )  # reworded
     assert not deletions_only("so it's like, done", "so it's done now")  # added a word
     assert not deletions_only("anything", "")
 
 
 def test_clean_read_applies_deletions_and_rejects_rewrites():
     en = _en("to, to help that, help us", "we like moving with full speed")
-    fake = lambda prompt: json.dumps([{"id": 0, "text": "to help us"}, {"id": 1, "text": "we're moving fast"}])
+    fake = lambda prompt: json.dumps(
+        [{"id": 0, "text": "to help us"}, {"id": 1, "text": "we're moving fast"}]
+    )
     out, applied, rejected = clean_read(en, fake)
     assert out.cues[0].lines == ["to help us"] and len(applied) == 1 and rejected == 1
     assert out.cues[1].lines == ["we like moving with full speed"]  # rewrite refused

@@ -3,4 +3,6 @@
 import os
 import tempfile
 
-os.environ.setdefault("DEV_TITLES_LLM_LOCK", os.path.join(tempfile.mkdtemp(prefix="dt-test-"), "llm.lock"))
+os.environ.setdefault(
+    "DEV_TITLES_LLM_LOCK", os.path.join(tempfile.mkdtemp(prefix="dt-test-"), "llm.lock")
+)

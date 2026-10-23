@@ -99,7 +99,9 @@ class AssemblyAITranscriber(Transcriber):
         try:
             import requests
         except ImportError as e:  # pragma: no cover
-            raise RuntimeError("Install AssemblyAI deps: pip install 'dev-titles[assemblyai]'") from e
+            raise RuntimeError(
+                "Install AssemblyAI deps: pip install 'dev-titles[assemblyai]'"
+            ) from e
 
         if not self.api_key:
             raise RuntimeError("Set ASSEMBLYAI_API_KEY (or pass api_key=)")

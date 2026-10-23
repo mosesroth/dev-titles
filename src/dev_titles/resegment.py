@@ -96,7 +96,9 @@ def merge_en_to_sentences(en: Subtitle) -> list[Sentence]:
         nxt = content[k + 1][1] if k + 1 < len(content) else ""
         # a cue ending in '.' continues if the next cue starts lowercase ("React." | "js developer")
         if txt.endswith(_SENT_END) and not nxt[:1].islower():
-            sents += _split_into_sentences(join_dotted_names(" ".join(buf).strip()), start, last_end)
+            sents += _split_into_sentences(
+                join_dotted_names(" ".join(buf).strip()), start, last_end
+            )
             buf, start = [], None
     if buf and start is not None:
         sents += _split_into_sentences(join_dotted_names(" ".join(buf).strip()), start, last_end)
@@ -373,7 +375,9 @@ def free_segment_default() -> bool:
     return os.environ.get("SUBTITLE_FREE_SEGMENT", "1") != "0"
 
 
-COMFORT_DUR = 3.0  # a one-line subtitle needs ~3 s to read; two lines ~6 s (native reviewer, 2026-10)
+COMFORT_DUR = (
+    3.0  # a one-line subtitle needs ~3 s to read; two lines ~6 s (native reviewer, 2026-10)
+)
 MERGE_MAX_GAP = 1.0  # only merge sentences spoken close together
 
 
@@ -397,7 +401,9 @@ def merge_short_sentences(sents, texts, spec: LangSpec, speakers=None):
         p = out[-1]
         joined = p[2] + sep + t
         short = (p[1] - p[0]) < COMFORT_DUR or (en_ - st) < COMFORT_DUR
-        fits = display_width(joined, True) <= cap * 0.95 and len(wrap_lines(joined, spec)) <= (spec.max_lines or 2)
+        fits = display_width(joined, True) <= cap * 0.95 and len(wrap_lines(joined, spec)) <= (
+            spec.max_lines or 2
+        )
         same = who == p[3]  # never put two speakers in one subtitle
         if same and short and fits and st - p[1] <= MERGE_MAX_GAP and en_ - p[0] <= spec.max_dur:
             out[-1] = [p[0], en_, joined, who]
@@ -521,8 +527,10 @@ def _rejoin_dotted_across_cues(cues: list[Cue]) -> list[Cue]:
             m = _DOT_SUFFIX.match(nxt)
             if _DOT_END.search(cur) and m:
                 lines[k] = cur + m.group(1)
-                flat[ni][nk] = nxt[m.end():].lstrip()
-    return [Cue(c.start, c.end, [ln for ln in fl if ln.strip()] or [""]) for c, fl in zip(cues, flat)]
+                flat[ni][nk] = nxt[m.end() :].lstrip()
+    return [
+        Cue(c.start, c.end, [ln for ln in fl if ln.strip()] or [""]) for c, fl in zip(cues, flat)
+    ]
 
 
 def _capitalize_across_cues(cues: list[Cue]) -> list[Cue]:
@@ -539,7 +547,12 @@ def _capitalize_across_cues(cues: list[Cue]) -> list[Cue]:
         last = prev.lines[-1].rstrip().split()[-1] if prev.lines[-1].strip() else ""
         first = cur.lines[0].lstrip()
         word = re.match(r"[a-z][a-z']*", first)
-        if last[-1:] in ".!?" and last.lower() not in _ABBREV and word and word.group(0) in _COMMON_START:
+        if (
+            last[-1:] in ".!?"
+            and last.lower() not in _ABBREV
+            and word
+            and word.group(0) in _COMMON_START
+        ):
             out[i] = Cue(cur.start, cur.end, [first[0].upper() + first[1:]] + list(cur.lines[1:]))
     return out
 
@@ -564,7 +577,9 @@ def normalize_en_layout(sub: Subtitle) -> Subtitle:
             continue
         text = re.sub(r"\s+", " ", " ".join(c.lines)).strip()
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)  # no space before punctuation (', that…')
-        wrapped = (_balance2(text, spec) if not spec.cjk and (spec.max_lines or 2) == 2 else None) or wrap_lines(text, spec)
+        wrapped = (
+            _balance2(text, spec) if not spec.cjk and (spec.max_lines or 2) == 2 else None
+        ) or wrap_lines(text, spec)
         if len(wrapped) <= (spec.max_lines or 2):
             out.append(Cue(c.start, c.end, wrapped))
             continue
@@ -574,11 +589,58 @@ def normalize_en_layout(sub: Subtitle) -> Subtitle:
     return Subtitle(sub.language, snap_gaps(enforce_min_dur(out, spec), spec)).renumber()
 
 
-_WEAK_END = {"the", "a", "an", "to", "of", "in", "into", "on", "at", "for", "with", "and", "or", "but",
-             "that", "is", "are", "was", "be", "my", "your", "our", "their", "its", "i", "we", "you",
-             # words that lead into a noun phrase ('the same | API', 'a very | big')
-             "same", "other", "new", "own", "more", "most", "very", "this", "these", "those", "some",
-             "any", "all", "every", "each", "such", "really", "so", "as", "from", "by", "about"}
+_WEAK_END = {
+    "the",
+    "a",
+    "an",
+    "to",
+    "of",
+    "in",
+    "into",
+    "on",
+    "at",
+    "for",
+    "with",
+    "and",
+    "or",
+    "but",
+    "that",
+    "is",
+    "are",
+    "was",
+    "be",
+    "my",
+    "your",
+    "our",
+    "their",
+    "its",
+    "i",
+    "we",
+    "you",
+    # words that lead into a noun phrase ('the same | API', 'a very | big')
+    "same",
+    "other",
+    "new",
+    "own",
+    "more",
+    "most",
+    "very",
+    "this",
+    "these",
+    "those",
+    "some",
+    "any",
+    "all",
+    "every",
+    "each",
+    "such",
+    "really",
+    "so",
+    "as",
+    "from",
+    "by",
+    "about",
+}
 
 
 def _balance2(text: str, spec: LangSpec) -> list[str] | None:
@@ -588,7 +650,7 @@ def _balance2(text: str, spec: LangSpec) -> list[str] | None:
         return [text]
     best, best_score = None, None
     for m in re.finditer(" ", text):
-        a, b = text[: m.start()], text[m.end():]
+        a, b = text[: m.start()], text[m.end() :]
         if len(a) > spec.max_cpl or len(b) > spec.max_cpl:
             continue
         score = -abs(len(a) - len(b)) / len(text) + (0.15 if a[-1] in ",.;:!?" else 0.0)
@@ -762,9 +824,11 @@ def resegment_translation(
     if not lines:
         return []
     max_lines = spec.max_lines or 2
-    groups = _pack_lines(text, lines, spec) if spec.cjk else [
-        lines[i : i + max_lines] for i in range(0, len(lines), max_lines)
-    ]
+    groups = (
+        _pack_lines(text, lines, spec)
+        if spec.cjk
+        else [lines[i : i + max_lines] for i in range(0, len(lines), max_lines)]
+    )
     widths = [max(sum(display_width(ln, spec.cjk) for ln in g), 0.5) for g in groups]
     total = sum(widths)
     span = max(end - start, 0.0)

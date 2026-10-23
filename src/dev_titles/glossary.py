@@ -130,6 +130,7 @@ class Glossary:
             for tok, span in (placeholders or {}).items():
                 t = t.replace(tok, span)
             return canonical in t
+
         # Avoid-form correction, ASCII forms only, is TARGET-DRIVEN: an English wrong-
         # form ('Strict Mode', 'Model Context Protocol') is safe to fix wherever it
         # appears (lookaround-bounded, can't corrupt a CJK word), and it must be — a

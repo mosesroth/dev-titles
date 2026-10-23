@@ -116,7 +116,7 @@ def condense_records(
 ):
     """Condense SentenceRecords in place. `coverage(src, tgt) -> missing_str` is guardrail 3 (empty
     string = complete). Returns stats {tried, accepted, rejected_guard, rejected_coverage}."""
-    st = Counter()
+    st: Counter = Counter()
     for k in range(0, len(records), batch):
         chunk = records[k : k + batch]
         items = [(r.src, r.txt, budgets[r.i]) if budgets else (r.src, r.txt) for r in chunk]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare candidate editor-acceptance gates on the gate_benchmark data.
 
-Input: <out>/grades.<lang>.jsonl from scripts/gate_benchmark.py. Every line there passed GPT's
+Input: <out>/grades.<lang>.jsonl from scripts/eval/gate_benchmark.py. Every line there passed GPT's
 same-meaning check and has a hindsight label (improved / neutral / harmed vs the human text).
 This adds the reference-free verdicts the other gates need, then replays each gate:
   - Claude pairwise verdict (the same PAIR_PROMPT GPT answered, randomized order);
@@ -16,7 +16,7 @@ Gates (all within GPT same_meaning):
   rated_or_gpt  GPT prefers OR both judges rate it strictly better
 Verdicts are cached in <out>/gate_verdicts.<lang>.jsonl (resumable).
 
-  PYTHONPATH=src python3 scripts/gate_compare.py --lang ja [--out output/gate_bench]
+  PYTHONPATH=src python3 scripts/eval/gate_compare.py --lang ja [--out output/gate_bench]
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ import re
 import types
 from pathlib import Path
 
+from dev_titles import llm
 from dev_titles.cli import _qe_second_judge
 from dev_titles.editor import PAIR_PROMPT, _parse_json_array
-from dev_titles import llm
 
 LNAME = {"ja": "Japanese", "zh-Hans": "Simplified Chinese"}
 RATE = """You are a native {L} speaker and professional subtitle reviewer. For each item: an English line and a
@@ -52,7 +52,9 @@ def rate(items, judge, L, label):
     out = {}
     for k in range(0, len(items), 10):
         ch = items[k : k + 10]
-        body = "\n\n".join(f"{n + 1}. EN: {x['en']}\n   SUBTITLE: {x['cand']}" for n, x in enumerate(ch))
+        body = "\n\n".join(
+            f"{n + 1}. EN: {x['en']}\n   SUBTITLE: {x['cand']}" for n, x in enumerate(ch)
+        )
         try:
             js = _parse_json_array(judge(RATE.format(L=L, body=body)) or "")
         except Exception:
@@ -73,7 +75,11 @@ def main():
     ap.add_argument("--ticket-dir", default="output/ticket")
     a = ap.parse_args()
     L = LNAME[a.lang]
-    rows = [json.loads(l) for l in Path(a.out, f"grades.{a.lang}.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows = [
+        json.loads(l)
+        for l in Path(a.out, f"grades.{a.lang}.jsonl").read_text(encoding="utf-8").splitlines()
+        if l.strip()
+    ]
     vp = Path(a.out, f"gate_verdicts.{a.lang}.jsonl")
     ver = {}
     if vp.exists():
@@ -87,12 +93,18 @@ def main():
     if todo:
         srcs = {}
         for v in {r["video"] for r in todo}:
-            recs = [json.loads(l) for l in open(Path(a.ticket_dir) / v / "cache.jsonl", encoding="utf-8") if l.strip()]
+            recs = [
+                json.loads(l)
+                for l in open(Path(a.ticket_dir) / v / "cache.jsonl", encoding="utf-8")
+                if l.strip()
+            ]
             srcs[v] = {x["i"]: x["src"] for x in recs if x.get("lang") == a.lang}
         rng = random.Random(f"compare:{a.lang}")
         claude_pref = {}
         for n, r in enumerate(todo, 1):
-            ctx = " ".join(srcs[r["video"]][j] for j in (r["i"] - 1, r["i"] + 1) if j in srcs[r["video"]])
+            ctx = " ".join(
+                srcs[r["video"]][j] for j in (r["i"] - 1, r["i"] + 1) if j in srcs[r["video"]]
+            )
             swap = rng.random() < 0.5
             A, B = (r["sugg"], r["orig"]) if swap else (r["orig"], r["sugg"])
             try:
@@ -106,17 +118,22 @@ def main():
                 print(f"  claude pairwise {n}/{len(todo)}", flush=True)
         items = []
         for r in todo:
-            items += [{"id": key(r) + "|o", "en": r["src"], "cand": r["orig"]},
-                      {"id": key(r) + "|s", "en": r["src"], "cand": r["sugg"]}]
+            items += [
+                {"id": key(r) + "|o", "en": r["src"], "cand": r["orig"]},
+                {"id": key(r) + "|s", "en": r["src"], "cand": r["sugg"]},
+            ]
         random.Random(9).shuffle(items)
         rc = rate(items, inv, L, "claude")
         rg = rate(items, gpt, L, "gpt")
         with vp.open("a", encoding="utf-8") as f:
             for r in todo:
                 k = key(r)
-                d = {"key": k, "claude_prefers": claude_pref[k],
-                     "rate_claude": [rc.get(k + "|o"), rc.get(k + "|s")],
-                     "rate_gpt": [rg.get(k + "|o"), rg.get(k + "|s")]}
+                d = {
+                    "key": k,
+                    "claude_prefers": claude_pref[k],
+                    "rate_claude": [rc.get(k + "|o"), rc.get(k + "|s")],
+                    "rate_gpt": [rg.get(k + "|o"), rg.get(k + "|s")],
+                }
                 ver[k] = d
                 f.write(json.dumps(d) + "\n")
 
@@ -135,19 +152,25 @@ def main():
         "rated_or_gpt": lambda r, v: r["prefers_new"] or rated_better(v),
     }
     total_imp = sum(r["delta"] < 0 for r in rows)
-    lines = [f"# Gate comparison — {a.lang}", "",
-             f"{len(rows)} graded suggestions (all passed GPT's same-meaning check); {total_imp} of them improve the line "
-             "per the hindsight grading (two graders vs the human text).", "",
-             "| gate | accepted | improved | neutral | harmed | new MEANING | share of available improvements | improved per harmed |",
-             "|---|---|---|---|---|---|---|---|"]
+    lines = [
+        f"# Gate comparison — {a.lang}",
+        "",
+        f"{len(rows)} graded suggestions (all passed GPT's same-meaning check); {total_imp} of them improve the line "
+        "per the hindsight grading (two graders vs the human text).",
+        "",
+        "| gate | accepted | improved | neutral | harmed | new MEANING | share of available improvements | improved per harmed |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for name, g in gates.items():
         acc = [r for r in rows if key(r) in ver and g(r, ver[key(r)])]
         imp = sum(r["delta"] < 0 for r in acc)
         harm = sum(r["delta"] > 0 for r in acc)
         mh = sum(r["meaning_harm"] for r in acc)
         ratio = f"{imp / harm:.1f}" if harm else "∞" if imp else "-"
-        lines.append(f"| {name} | {len(acc)} | {imp} | {len(acc) - imp - harm} | {harm} | {mh} | "
-                     f"{imp / max(total_imp, 1):.0%} | {ratio} |")
+        lines.append(
+            f"| {name} | {len(acc)} | {imp} | {len(acc) - imp - harm} | {harm} | {mh} | "
+            f"{imp / max(total_imp, 1):.0%} | {ratio} |"
+        )
     Path(a.out, f"GATES.{a.lang}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     print("DONE")

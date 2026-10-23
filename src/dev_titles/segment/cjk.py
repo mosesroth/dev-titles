@@ -655,7 +655,9 @@ def normalize_ja_punct(text: str) -> str:
     text = text.replace("、", " ").replace("。", "　")
     text = re.sub(r"[ 　]*　[ 　]*", "　", text)  # a run containing a full-width space -> one
     text = re.sub(r"[ 　]+(?=[」』）\)])", "", text)  # no space before a closing bracket
-    text = ja_myriad_numbers(text)  # 50,000人 -> 5万人 (JP subtitle style guide: 1 million USD -> 100万米ドル)
+    text = ja_myriad_numbers(
+        text
+    )  # 50,000人 -> 5万人 (JP subtitle style guide: 1 million USD -> 100万米ドル)
     # ARABIC COUNTER (JP style guide §1.3-1.4, confirmed by a set of reviewed files: 1つ 27 / 一つ 0,
     # 2つ 4 / 二つ 0). NARROW on purpose — only the 〜つ counter. Kanji numerals stay inside words
     # (一部 4 / 1部 0, 一緒, 一方), so a blanket 一 -> 1 would corrupt them.
@@ -720,7 +722,9 @@ def normalize_zh_punct(text: str, at_cue_boundary: bool = True) -> str:
     text = cjk_myriad_numbers(text, ten_thousand="万", hundred_million="亿")
     # Interior questions keep ？ (zh reviewers added 41 in 6 videos: 真的吗？哦… / …对吧？我们…);
     # restore_question_mark only handles the END of a segment.
-    text = re.sub(r"(吗|对吧|是吧)(?:\x00|\s)+(?=[^\s])", r"\1？", text)  # ？ replaces the break space
+    text = re.sub(
+        r"(吗|对吧|是吧)(?:\x00|\s)+(?=[^\s])", r"\1？", text
+    )  # ？ replaces the break space
     text = re.sub(r"(吗|对吧|是吧)(?=[^？?！!，,。、；;：:”」』\s)\x00]|$)", r"\1？", text)
     text = re.sub(r"\x00+", " ", text)
     # ASCII double quotes -> Chinese curly quotes, paired (reviewers: 0 ASCII, 24 curly).

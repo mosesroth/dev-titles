@@ -26,7 +26,9 @@ def test_held_items_block_until_signed_off(tmp_path):
 
 
 def test_editing_the_en_after_sign_off_needs_a_new_sign_off(tmp_path):
-    en_gate.save_review_state(tmp_path, "ok", [{"ts": "03:29", "kind": "en-garbled", "detail": "x"}])
+    en_gate.save_review_state(
+        tmp_path, "ok", [{"ts": "03:29", "kind": "en-garbled", "detail": "x"}]
+    )
     en_gate.approve(tmp_path, _en(), by="tester")
     ok, why, _ = en_gate.check(_en("We have this plush where we can use it."), tmp_path)
     assert not ok and "changed" in why
@@ -43,7 +45,7 @@ def test_legacy_markdown_review_is_read(tmp_path):
     (tmp_path / "en_review.md").write_text(
         "# EN editorial review\n\n## Auto-applied clear-error fixes (0)\n\n_None._\n\n"
         "## Needs your adjudication (1)\n\n| Time | Kind | Detail |\n|---|---|---|\n"
-        "| 13:48 | en-garbled | [cue 178] \"this plush\" is nonsensical |\n",
+        '| 13:48 | en-garbled | [cue 178] "this plush" is nonsensical |\n',
         encoding="utf-8",
     )
     status, held = en_gate.review_state(tmp_path)
@@ -53,8 +55,24 @@ def test_legacy_markdown_review_is_read(tmp_path):
 
 def test_blocked_gate_writes_listen_page(tmp_path):
     (tmp_path / "SOURCE-URL.txt").write_text("https://www.youtube.com/watch?v=abcDEF12345\n")
-    en = Subtitle("en", [Cue(826.0, 828.0, ["Slash AI. Okay."]), Cue(828.7, 833.6, ["We have this plush where", "we can just use it."])])
-    en_gate.save_review_state(tmp_path, "ok", [{"ts": "13:48", "kind": "en-garbled", "detail": "[cue 2] \"this plush where we can just use it\" is nonsensical"}])
+    en = Subtitle(
+        "en",
+        [
+            Cue(826.0, 828.0, ["Slash AI. Okay."]),
+            Cue(828.7, 833.6, ["We have this plush where", "we can just use it."]),
+        ],
+    )
+    en_gate.save_review_state(
+        tmp_path,
+        "ok",
+        [
+            {
+                "ts": "13:48",
+                "kind": "en-garbled",
+                "detail": '[cue 2] "this plush where we can just use it" is nonsensical',
+            }
+        ],
+    )
     assert not en_gate.require(en, tmp_path)
     page = (tmp_path / "EN_LISTEN.html").read_text(encoding="utf-8")
     assert "watch?v=abcDEF12345&t=826s" in page  # 2 s before 13:48.7

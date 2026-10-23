@@ -1,30 +1,13 @@
 """Split from test_core: cli tests (5)."""
 
-from dev_titles.config import spec_for
-from dev_titles.cue_builder import build_en_cues
 from dev_titles.eval import (
-    GembaMqmScorer,
-    QeResult,
     QeScorer,
-    below_threshold_segments,
-    parse_gemba_mqm,
-    rank_engines,
 )
-from dev_titles.formats import read_vtt, write_srt, write_vtt
 from dev_titles.glossary import load
-from dev_titles.linguistics import get_joiner, is_repeated_text
 from dev_titles.model import Cue, Subtitle
-from dev_titles.segment import apply_kinsoku, break_lines, normalize_zh_punct
-from dev_titles.textwidth import display_width
-from dev_titles.transcribe import from_transcribe_json
 from dev_titles.translate import (
-    TranslationRequest,
     Translator,
-    build_translate_prompt,
-    translate_segment,
 )
-from dev_titles.validate import validate_subtitle
-from dev_titles.validate.rules import validity_report
 
 
 def test_run_pilot_multi_engine_ranks(tmp_path):
@@ -33,7 +16,8 @@ def test_run_pilot_multi_engine_ranks(tmp_path):
 
     g = load("glossary/glossary.yaml")
     en = Subtitle(
-        "en", [Cue(0.0, 2.0, ["Submit your app."]), Cue(2.5, 4.5, ["Publish your VS Code extension."])]
+        "en",
+        [Cue(0.0, 2.0, ["Submit your app."]), Cue(2.5, 4.5, ["Publish your VS Code extension."])],
     )
     clip = Clip("clip1", en)
 
@@ -86,7 +70,13 @@ def test_cli_translator_argv_and_stdin():
     tr = CliTranslator(binary="/bin/claude", runner=fake_runner, env={"ANTHROPIC_API_KEY": "k"})
     out = tr.translate(TranslationRequest("Submit your app", "en", "zh-Hans"))
     assert out == "提交您的应用"  # stripped
-    assert seen["argv"] == ["/bin/claude", "-p", "--output-format", "text", "--bare"]  # API key -> bare
+    assert seen["argv"] == [
+        "/bin/claude",
+        "-p",
+        "--output-format",
+        "text",
+        "--bare",
+    ]  # API key -> bare
     assert "--model" not in seen["argv"]
     assert "<TRANSLATE_THIS>" in seen["prompt"]  # prompt goes on stdin
 

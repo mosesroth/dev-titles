@@ -41,7 +41,9 @@ def test_cli_flag_configures_backend(monkeypatch):
     from dev_titles import cli, llm
 
     seen = {}
-    monkeypatch.setattr(cli, "cmd_validate", lambda a: seen.setdefault("b", (llm.backend(), llm.model())) and 0)
+    monkeypatch.setattr(
+        cli, "cmd_validate", lambda a: seen.setdefault("b", (llm.backend(), llm.model())) and 0
+    )
     cli.main(["--llm", "openai", "--llm-model", "llama3.1", "validate", "x.vtt", "--lang", "ja"])
     assert seen["b"] == ("openai", "llama3.1")
 
@@ -78,7 +80,9 @@ def test_openai_compat_request_and_retry(monkeypatch):
             raise urllib.error.HTTPError(url, 429, "slow down", {}, None)
         return {"choices": [{"message": {"content": "  こんにちは  "}}]}
 
-    t = oc.OpenAICompatTranslator(model_id="llama3.1", base_url="http://localhost:11434/v1/", api_key="", post=post)
+    t = oc.OpenAICompatTranslator(
+        model_id="llama3.1", base_url="http://localhost:11434/v1/", api_key="", post=post
+    )
     out = t.translate(TranslationRequest("Hello", "en", "ja"))
     assert out == "こんにちは" and len(calls) == 2  # retried the 429
     url, body, headers = calls[-1]
@@ -97,7 +101,11 @@ def test_openai_compat_needs_model_and_key(monkeypatch):
         OpenAICompatTranslator()
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         OpenAICompatTranslator(model_id="gpt-5.5")
-    t = OpenAICompatTranslator(model_id="gpt-5.5", api_key="sk-test", post=lambda *a: {"choices": [{"message": {"content": "ok"}}]})
+    t = OpenAICompatTranslator(
+        model_id="gpt-5.5",
+        api_key="sk-test",
+        post=lambda *a: {"choices": [{"message": {"content": "ok"}}]},
+    )
     assert t._invoke("x") == "ok"
 
 

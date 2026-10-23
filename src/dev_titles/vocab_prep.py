@@ -118,6 +118,7 @@ def extract_lookup_terms(seed_text: str, max_terms: int = 40) -> list[str]:
     # World→世界 / Code→符号. Count only outside-a-run uses.
     # (Sentence-initial tutorial imperatives — Press/Choose/Check — are in _COMMON_WORDS.)
     _runs = [m.span() for sent in [seed_text] for m in _PROPER.finditer(sent)]
+
     def _standalone(w: str) -> int:
         n = 0
         for m in re.finditer(rf"\b{re.escape(w)}\b", seed_text):
@@ -126,6 +127,7 @@ def extract_lookup_terms(seed_text: str, max_terms: int = 40) -> list[str]:
                 continue  # inside a multi-word proper run
             n += 1
         return n
+
     for w, ccount in cap_form.items():
         if w in _STOP or _is_common_word(w):
             continue
@@ -215,6 +217,7 @@ def build_video_vocab(
             return True
         # a sub-phrase of a curated name ('Orbit Virtual' ⊂ 'Orbit Virtual Device')
         return " " in tl and any(f" {tl} " in f" {k} " for k in _known if " " in k)
+
     idents: list[str] = []
     for t in terms:
         try:
@@ -371,7 +374,9 @@ def http_fetch(url: str, timeout: int = 20) -> str:
     html = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", html)
     import html as _html
 
-    return _html.unescape(re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", html))).strip()  # &amp; -> &
+    return _html.unescape(
+        re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", html))
+    ).strip()  # &amp; -> &
 
 
 def wikipedia_langlink_title(entity: str, lang_code: str, web_fetch) -> str | None:

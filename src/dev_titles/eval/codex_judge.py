@@ -59,8 +59,11 @@ def ensure_clean_codex_home(home: str = JUDGE_HOME, src_home: str = "~/.codex") 
     if cfg.get("model_reasoning_effort"):
         lines.append(f'model_reasoning_effort = "{cfg["model_reasoning_effort"]}"')
     provider = cfg.get("model_provider")
-    tail = ['[shell_environment_policy]\ninherit = "all"', "[feedback]\nenabled = false",
-            "[analytics]\nenabled = false"]
+    tail = [
+        '[shell_environment_policy]\ninherit = "all"',
+        "[feedback]\nenabled = false",
+        "[analytics]\nenabled = false",
+    ]
     if provider and provider != "openai":
         lines += [f'model_provider = "{provider}"', 'forced_login_method = "api"']
         if cfg.get("chatgpt_base_url"):
@@ -68,8 +71,10 @@ def ensure_clean_codex_home(home: str = JUDGE_HOME, src_home: str = "~/.codex") 
         pblock = (cfg.get("model_providers") or {}).get(provider) or {}
         aws = pblock.get("aws") or {}
         if aws:
-            tail.append(f"[model_providers.{provider}.aws]\n"
-                        + "\n".join(f'{k} = "{v}"' for k, v in aws.items() if isinstance(v, str)))
+            tail.append(
+                f"[model_providers.{provider}.aws]\n"
+                + "\n".join(f'{k} = "{v}"' for k, v in aws.items() if isinstance(v, str))
+            )
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n\n" + "\n\n".join(tail) + "\n")
     # reuse the user's login (ChatGPT sign-in or stored API key); a symlink keeps token
@@ -84,7 +89,9 @@ def ensure_clean_codex_home(home: str = JUDGE_HOME, src_home: str = "~/.codex") 
 
 
 def _default_runner(argv: list[str], prompt: str, timeout: float, out_path: str, env=None) -> str:
-    subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=timeout, check=False, env=env)
+    subprocess.run(
+        argv, input=prompt, capture_output=True, text=True, timeout=timeout, check=False, env=env
+    )
     with open(out_path, encoding="utf-8") as fh:
         return fh.read()
 
@@ -124,7 +131,9 @@ class CodexCliJudge:
                 # lean config (no mcp/plugins), passed per call so parallel judges can't race on
                 # a process-wide os.environ change
                 env = {**os.environ, "CODEX_HOME": self.codex_home}
-                return _default_runner(self._argv(out_path), prompt, self.timeout, out_path, env=env).strip()
+                return _default_runner(
+                    self._argv(out_path), prompt, self.timeout, out_path, env=env
+                ).strip()
             return self._runner(self._argv(out_path), prompt, self.timeout, out_path).strip()
         finally:
             try:

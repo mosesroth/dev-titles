@@ -104,9 +104,9 @@ def cmd_review(args) -> int:
 
 def cmd_pilot(args) -> int:
     """Run the pilot harness over clips with the CLI translator engine."""
+    from . import llm
     from .glossary import load as load_glossary
     from .pilot import EngineSpec, load_clip, run_pilot
-    from . import llm
 
     langs = args.lang or ["zh-Hans", "ja"]
     glossary = load_glossary(args.glossary)
@@ -135,8 +135,8 @@ def cmd_pilot(args) -> int:
 def _maybe_clean(sub, do_clean: bool):
     if not do_clean:
         return sub
-    from .cleanup import polish_subtitle
     from . import llm
+    from .cleanup import polish_subtitle
 
     return polish_subtitle(sub, llm.invoke())
 
@@ -223,10 +223,10 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
         if saved.exists() and (Path(out) / "en.orig.vtt").exists():
             return _read_any(str(saved), "en")
         return en
+    from . import llm
     from .en_cleanread import clean_read, speech_style
     from .transcribe_qe import en_autofix
     from .transcribe_qe import en_review as _rev
-    from . import llm
 
     invoke = llm.invoke()
     # CLEAN-READ unscripted speech first (deletions / punctuation only), so the review and the sign-off
@@ -242,18 +242,35 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
         if cleaned:
             p = Path(out) / "en.vtt"
             if p.exists() and not (Path(out) / "en.orig.vtt").exists():
-                (Path(out) / "en.orig.vtt").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+                (Path(out) / "en.orig.vtt").write_text(
+                    p.read_text(encoding="utf-8"), encoding="utf-8"
+                )
             elif not (Path(out) / "en.orig.vtt").exists():
                 (Path(out) / "en.orig.vtt").write_text(write_vtt(en), encoding="utf-8")
             p.write_text(write_vtt(en_c), encoding="utf-8")
             en = en_c
-        print(f"EN clean-read ({style['style']}: {style['why']}): {len(cleaned)} cue(s) cleaned, {_rej} rejected")
+        print(
+            f"EN clean-read ({style['style']}: {style['why']}): {len(cleaned)} cue(s) cleaned, {_rej} rejected"
+        )
     else:
         print(f"EN clean-read skipped: scripted ({style['why']})")
-    cr_lines = [f"## Clean-read ({style['style']}: {style['why']}) — {len(cleaned)} cue(s), deletions only", ""]
-    cr_lines += ([f"| {int(c['start']) // 60:02d}:{int(c['start']) % 60:02d} | {c['old']!r} | {c['new']!r} |" for c in cleaned]
-                 if cleaned else ["_None._"])
-    cr_lines = (cr_lines[:2] + ["| Time | Before | After |", "|---|---|---|"] + cr_lines[2:]) if cleaned else cr_lines
+    cr_lines = [
+        f"## Clean-read ({style['style']}: {style['why']}) — {len(cleaned)} cue(s), deletions only",
+        "",
+    ]
+    cr_lines += (
+        [
+            f"| {int(c['start']) // 60:02d}:{int(c['start']) % 60:02d} | {c['old']!r} | {c['new']!r} |"
+            for c in cleaned
+        ]
+        if cleaned
+        else ["_None._"]
+    )
+    cr_lines = (
+        (cr_lines[:2] + ["| Time | Before | After |", "|---|---|---|"] + cr_lines[2:])
+        if cleaned
+        else cr_lines
+    )
     cr_lines.append("")
     from . import en_gate
 
@@ -266,7 +283,9 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
     if not issues:
         en_gate.save_review_state(out, "ok", [])
         rpath.write_text(
-            f"# EN editorial review — {title}\n\n" + "\n".join(cr_lines) + "\nNo editorial issues flagged.\n",
+            f"# EN editorial review — {title}\n\n"
+            + "\n".join(cr_lines)
+            + "\nNo editorial issues flagged.\n",
             encoding="utf-8",
         )
         print("EN review: no editorial issues flagged.")
@@ -329,12 +348,11 @@ def _looks_like_raw_caption(en) -> bool:
 def cmd_localize(args) -> int:
     """EN subtitle -> zh-Hans/ja review-ready cues (translate + glossary + register +
     reflect + completeness gates + CJK re-segmentation), then a review bundle."""
+    from . import llm
+    from .cue_builder import strip_sound_tags
     from .glossary import load as load_glossary
     from .localize import localize_en
     from .review import build_review_bundle
-    from . import llm
-
-    from .cue_builder import strip_sound_tags
 
     en = strip_sound_tags(_read_any(args.input, "en"))  # [music]/(applause) never reach translation
     glossary = load_glossary(args.glossary)
@@ -409,8 +427,13 @@ def _save_raw(transcript, path) -> None:
     _P(path).write_text(
         json.dumps(
             [
-                {"text": w.text, "start": w.start, "end": w.end, "confidence": w.confidence,
-                 **({"speaker": w.speaker} if getattr(w, "speaker", None) else {})}
+                {
+                    "text": w.text,
+                    "start": w.start,
+                    "end": w.end,
+                    "confidence": w.confidence,
+                    **({"speaker": w.speaker} if getattr(w, "speaker", None) else {}),
+                }
                 for w in transcript.words
             ]
         ),
@@ -430,10 +453,10 @@ def _correct_transcript(transcript, glossary, video_vocab, names=None):
     the original word timestamps: fixes mis-heard jargon, re-joins spelled-out
     identifiers (TVFocusGuideView), corrects non-native grammar, drops filler, and
     fixes mangled speaker names to their confirmed spelling."""
+    from . import llm
     from .cleanup import correct_transcript
     from .cue_builder import low_confidence_spans
     from .transcribe.retime import retime_corrected
-    from . import llm
 
     terms = sorted(
         {f for t in glossary.terms for f in t.all_source_forms if any(c.isalpha() for c in f)}
@@ -457,8 +480,8 @@ def _correct_transcript(transcript, glossary, video_vocab, names=None):
 def cmd_audit(args) -> int:
     """Audit OURS against a REFERENCE subtitle: substantive word-diffs, LLM-classified
     (ERROR/A_OK/EDGE), into a verdict-labeled review sheet. Transcription or translation."""
-    from .audit import classify, word_diffs, write_review_xlsx
     from . import llm
+    from .audit import classify, word_diffs, write_review_xlsx
 
     ours = _read_any(args.ours, args.lang or "en")
     ref = _read_any(args.reference, args.lang or "en")
@@ -561,10 +584,10 @@ def cmd_rescore(args) -> int:
     leaves the old, stale-low score. Re-judges cue-for-cue (target cue N vs EN cue N, strict 1:1)
     with the same panel as the pipeline and recomputes the deterministic suspects. Writes ONLY
     REVIEW.md + status.json — never the SRT/VTT, so hand-fixed line breaks are preserved."""
+    from . import llm
     from .glossary import load as load_glossary
     from .localize import SentenceRecord, _write_status, llm_serialize_lock
     from .review import LangOutput, render_review_markdown
-    from . import llm
     from .translation_qe import translation_suspects
 
     out = Path(args.out)
@@ -610,7 +633,9 @@ def _save_description_file(args):
     f = getattr(args, "description_file", None)
     if f and getattr(args, "out", None):
         Path(args.out).mkdir(parents=True, exist_ok=True)
-        (Path(args.out) / "description.txt").write_text(Path(f).read_text(encoding="utf-8"), encoding="utf-8")
+        (Path(args.out) / "description.txt").write_text(
+            Path(f).read_text(encoding="utf-8"), encoding="utf-8"
+        )
 
 
 def _qe_second_judge(args):
@@ -622,7 +647,9 @@ def _qe_second_judge(args):
     from . import llm
 
     if getattr(args, "single_judge", False):
-        print(f"QE judge: single-judge ({llm.label()} only) — 2nd judge disabled via --single-judge")
+        print(
+            f"QE judge: single-judge ({llm.label()} only) — 2nd judge disabled via --single-judge"
+        )
         return None
     judge, what = llm.second_judge()
     if judge is None:
@@ -645,16 +672,22 @@ def _resolve_engine(name: str) -> str:
     if apple_silicon and importlib.util.find_spec("parakeet_mlx"):
         return "parakeet"
     if importlib.util.find_spec("whisperx"):
-        print("ASR: WhisperX (Parakeet needs Apple Silicon + parakeet-mlx)" if not apple_silicon
-              else "ASR: WhisperX (parakeet-mlx not installed)")
+        print(
+            "ASR: WhisperX (Parakeet needs Apple Silicon + parakeet-mlx)"
+            if not apple_silicon
+            else "ASR: WhisperX (parakeet-mlx not installed)"
+        )
         return "whisper"
     if os.environ.get("ASSEMBLYAI_API_KEY"):
         print("ASR: AssemblyAI (no local ASR installed; $ASSEMBLYAI_API_KEY is set)")
         return "assemblyai"
     raise SystemExit(
         "No speech-recognition engine installed. Pick one:\n"
-        + ("  pip install 'dev-titles[parakeet,whisper]'   # Parakeet + WhisperX drop recovery (Apple Silicon)\n"
-           if apple_silicon else "")
+        + (
+            "  pip install 'dev-titles[parakeet,whisper]'   # Parakeet + WhisperX drop recovery (Apple Silicon)\n"
+            if apple_silicon
+            else ""
+        )
         + "  pip install 'dev-titles[whisper]'            # WhisperX, local, any platform\n"
         "  pip install 'dev-titles[assemblyai]'         # AssemblyAI cloud: set $ASSEMBLYAI_API_KEY, --engine assemblyai\n"
         "Or pass an existing English subtitle file instead of media."
@@ -681,7 +714,8 @@ def _auto_conversational(video_vocab) -> bool:
     """Interview/dialogue heuristic: >=2 distinct named speakers -> conversational register
     (casual zh 你, spoken JA). Monologue tutorials have 0-1 speaker. Without this, an
     interview can ship in the formal register simply because nobody flagged it conversational;
-    now conversational is the default for multi-speaker content. Overridable via --conversational / --no-conversational."""
+    now conversational is the default for multi-speaker content. Overridable via --conversational / --no-conversational.
+    """
     names = {
         (n or "").strip().lower() for n in (video_vocab or {}).get("names", []) if n and n.strip()
     }
@@ -701,17 +735,20 @@ def _conversational(args, video_vocab) -> bool:
 def cmd_run(args) -> int:
     """One entry: resolve an input (local file or YouTube URL) then do transcription,
     translation, or both. Media -> both by default; a subtitle input -> translate only."""
+    from . import llm
     from .glossary import load as load_glossary
     from .ingest import resolve_input
     from .localize import localize_en
     from .review import build_review_bundle
     from .transcribe import WhisperTranscriber
-    from . import llm
 
     ri = resolve_input(args.input, workdir=str(Path(args.out) / "_ingest"))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    if str(args.input).startswith(("http://", "https://")) and not (out / "SOURCE-URL.txt").exists():
+    if (
+        str(args.input).startswith(("http://", "https://"))
+        and not (out / "SOURCE-URL.txt").exists()
+    ):
         # the source link: listen-list pages (EN_LISTEN.html), held-out exclusion and publishing use it
         (out / "SOURCE-URL.txt").write_text(str(args.input).strip() + "\n", encoding="utf-8")
     want_tx = not args.translate_only
@@ -808,7 +845,9 @@ def cmd_run(args) -> int:
                             "pip install 'dev-titles[whisper]' (or pass --no-recover to silence this)."
                         )
                     else:
-                        print(f"  recovery skipped ({type(e).__name__}: {str(e)[:120]}); Parakeet output kept")
+                        print(
+                            f"  recovery skipped ({type(e).__name__}: {str(e)[:120]}); Parakeet output kept"
+                        )
             _save_raw(transcript, raw_p)
         elif engine == "assemblyai":
             # AssemblyAI cloud (Universal + diarization) — for public interview content.
@@ -1013,9 +1052,7 @@ def cmd_run(args) -> int:
             try:
                 autosub = load_autosub(ri.auto_captions)
                 en_text = " ".join(" ".join(c.lines) for c in en.cues)
-                flags = [
-                    p["phrase"] for p in plausibility_suspects(llm.invoke(), en_text)
-                ]
+                flags = [p["phrase"] for p in plausibility_suspects(llm.invoke(), en_text)]
                 fixes = autosub_consult(
                     en, recovery_second, autosub, flags, logger=lambda m: print(m, flush=True)
                 )
@@ -1094,7 +1131,9 @@ def cmd_approve_en(args) -> int:
     for h in held:
         print(f"  held {h.get('ts', '?'):>6}  {h.get('kind', '')}: {h.get('detail', '')}")
     rec = en_gate.approve(args.out, en, by=getpass.getuser(), note=args.note)
-    print(f"EN signed off: {en_path} ({len(held)} held line(s) resolved by {rec['by']}, {rec['at']})")
+    print(
+        f"EN signed off: {en_path} ({len(held)} held line(s) resolved by {rec['by']}, {rec['at']})"
+    )
     return 0
 
 
@@ -1129,7 +1168,9 @@ def main(argv=None) -> int:
         "Codex CLI, e.g. signed in with ChatGPT), openai (any OpenAI-compatible API via "
         "$OPENAI_API_KEY / $OPENAI_BASE_URL). Also $DEV_TITLES_LLM.",
     )
-    p.add_argument("--llm-model", default=None, help="model id for the --llm backend (required for openai)")
+    p.add_argument(
+        "--llm-model", default=None, help="model id for the --llm backend (required for openai)"
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     v = sub.add_parser("validate", help="check a subtitle file against per-language rules")
@@ -1468,7 +1509,9 @@ def main(argv=None) -> int:
         "--qe-judge", action="store_true", default=True, help="run the LLM MQM panel (default on)"
     )
     rs.add_argument(
-        "--single-judge", action="store_true", help="primary-model-only DQF (skip the different-family 2nd judge)"
+        "--single-judge",
+        action="store_true",
+        help="primary-model-only DQF (skip the different-family 2nd judge)",
     )
     rs.set_defaults(func=cmd_rescore)
 

@@ -1,30 +1,7 @@
 """Split from test_core: misc tests (24)."""
 
-from dev_titles.config import spec_for
-from dev_titles.cue_builder import build_en_cues
-from dev_titles.eval import (
-    GembaMqmScorer,
-    QeResult,
-    QeScorer,
-    below_threshold_segments,
-    parse_gemba_mqm,
-    rank_engines,
-)
-from dev_titles.formats import read_vtt, write_srt, write_vtt
 from dev_titles.glossary import load
-from dev_titles.linguistics import get_joiner, is_repeated_text
 from dev_titles.model import Cue, Subtitle
-from dev_titles.segment import apply_kinsoku, break_lines, normalize_zh_punct
-from dev_titles.textwidth import display_width
-from dev_titles.transcribe import from_transcribe_json
-from dev_titles.translate import (
-    TranslationRequest,
-    Translator,
-    build_translate_prompt,
-    translate_segment,
-)
-from dev_titles.validate import validate_subtitle
-from dev_titles.validate.rules import validity_report
 
 
 def test_anthropic_translator_builds_request_and_extracts_text():
@@ -100,7 +77,9 @@ def test_speaker_name_handling():
     from dev_titles.localize import effective_glossary
     from dev_titles.vocab_prep import extract_name_candidates, renderings_to_terms  # noqa
 
-    cands = extract_name_candidates("Hello, my name is Chris Hartley. Today I'm Priya and we build.")
+    cands = extract_name_candidates(
+        "Hello, my name is Chris Hartley. Today I'm Priya and we build."
+    )
     assert "Chris Hartley" in cands and "Priya" in cands
 
     from dev_titles.vocab_prep import harvest_names
@@ -111,9 +90,9 @@ def test_speaker_name_handling():
     ) == ["Michael Brennan", "Chris Hartley", "Priya Kumar"]
     assert harvest_names("", "A talk by Jane Doe & John Smith") == ["Jane Doe", "John Smith"]
     # role-title + name (real YouTube-description forms); the title itself is not a name
-    assert harvest_names("", "Join Senior Solutions Architect Chris Hartley as he walks through") == [
-        "Chris Hartley"
-    ]
+    assert harvest_names(
+        "", "Join Senior Solutions Architect Chris Hartley as he walks through"
+    ) == ["Chris Hartley"]
     assert harvest_names(
         "", "In this video Sr. Developer Evangelist Giovanni Rinaldi discusses"
     ) == ["Giovanni Rinaldi"]
@@ -403,9 +382,7 @@ def test_name_registry_match(tmp_path):
     hits = match_registry_names(text, reg, first_name_context=text)
     assert "Eric Vandermolen" in hits  # full-name whole-word
     assert "Giovanni Rinaldi" in hits  # bare "Giovanni" promoted to unique fuller
-    assert (
-        "Gio Rinaldi" not in hits and "Gio" not in hits
-    )  # 'gio' must NOT match inside 'giovanni'
+    assert "Gio Rinaldi" not in hits and "Gio" not in hits  # 'gio' must NOT match inside 'giovanni'
     # common-English-word first name must NOT match on the verb "will"
     assert "Will Jones" not in match_registry_names(
         "we will build apps", reg, first_name_context="we will build apps"
@@ -1089,8 +1066,14 @@ def test_condense_trigger_and_original_log(tmp_path):
     sp = tmp_path / "condense_state.ja.json"
     kw = dict(coverage_missing=lambda *a: "", normalize=lambda t, s=None: t, logger=lambda m: None)
     changed = condense_lang(
-        [near, far], invoke, "ja", "Japanese", sp,
-        budgets={0: 8, 1: 8}, triggers={0: 10, 1: 10}, **kw,
+        [near, far],
+        invoke,
+        "ja",
+        "Japanese",
+        sp,
+        budgets={0: 8, 1: 8},
+        triggers={0: 10, 1: 10},
+        **kw,
     )
     assert changed == {1} and near.txt == "少しだけ長い行です"
     assert load_originals(sp, [near, far]) == {1: orig_far}
@@ -1098,8 +1081,19 @@ def test_condense_trigger_and_original_log(tmp_path):
     mark_processed(sp, [far])
     assert load_originals(sp, [far]) == {}  # current text is no longer the condensed edit
     calls = []
-    assert condense_lang([far], lambda p: calls.append(p) or "[]", "ja", "Japanese", sp,
-                         budgets={1: 8}, triggers={1: 10}, **kw) == set()
+    assert (
+        condense_lang(
+            [far],
+            lambda p: calls.append(p) or "[]",
+            "ja",
+            "Japanese",
+            sp,
+            budgets={1: 8},
+            triggers={1: 10},
+            **kw,
+        )
+        == set()
+    )
     assert not calls  # reverted line stays reverted
 
 
@@ -1109,7 +1103,6 @@ def test_vocab_fragments_and_consistent_longer_terms():
     is CONSISTENT with a contained curated word is kept (Developer Options->开发者选项), else the
     soft one-word term half-translates it (开发者Options)."""
     from dev_titles.glossary import Glossary, Term
-
     from dev_titles.localize import effective_glossary
 
     g = Glossary(
@@ -1118,7 +1111,7 @@ def test_vocab_fragments_and_consistent_longer_terms():
         terms=[
             Term(source="Orbit TV", translations={"zh-Hans": "Orbit TV"}, enforce="hard"),
             Term(source="Developer", translations={"zh-Hans": "开发者"}, enforce="soft"),
-        ]
+        ],
     )
     vocab = {
         "renderings": {
@@ -1147,9 +1140,20 @@ def test_enforce_resolves_caller_placeholders():
     g = Glossary(
         "1",
         ["zh-Hans"],
-        terms=[Term(source="Nimbus Virtual Device", translations={"zh-Hans": "Nimbus虚拟设备"}, enforce="hard")]
+        terms=[
+            Term(
+                source="Nimbus Virtual Device",
+                translations={"zh-Hans": "Nimbus虚拟设备"},
+                enforce="hard",
+            )
+        ],
     )
-    _, iss = g.enforce("启动[[0]]虚拟设备", "Start Nimbus Virtual Device.", "zh-Hans", placeholders={"[[0]]": "Nimbus"})
+    _, iss = g.enforce(
+        "启动[[0]]虚拟设备",
+        "Start Nimbus Virtual Device.",
+        "zh-Hans",
+        placeholders={"[[0]]": "Nimbus"},
+    )
     assert not [i for i in iss if i.kind == "missing"]
 
 
@@ -1158,13 +1162,17 @@ def test_leftover_english_only_whole_latin_run():
     from dev_titles.glossary import _replace_latin_run
     from dev_titles.localize import stale_untranslated_reuse
 
-    assert _replace_latin_run("在Hello World Multi-TV中", "TV", "电视") == "在Hello World Multi-TV中"
+    assert (
+        _replace_latin_run("在Hello World Multi-TV中", "TV", "电视") == "在Hello World Multi-TV中"
+    )
     assert _replace_latin_run("打开Orbit TV", "TV", "电视") == "打开Orbit TV"
     assert _replace_latin_run("看TV吧", "TV", "电视") == "看电视吧"
     from dev_titles.glossary import Glossary, Term
 
     g = Glossary("1", ["zh-Hans"], terms=[Term(source="TV", translations={"zh-Hans": "电视"})])
-    assert not stale_untranslated_reuse("在Orbit TV Stick上验证", "validate on an Orbit TV Stick", g, "zh-Hans")
+    assert not stale_untranslated_reuse(
+        "在Orbit TV Stick上验证", "validate on an Orbit TV Stick", g, "zh-Hans"
+    )
     assert stale_untranslated_reuse("在TV上观看", "watch on TV", g, "zh-Hans")
 
 
@@ -1178,17 +1186,30 @@ def test_term_pin_guards_curated_and_common_phrase():
     recs = [
         SentenceRecord("ja", 0, "Start Nimbus Virtual Device.", "Nimbus仮想デバイスを起動", "", []),
         SentenceRecord("ja", 1, "Open home screen dot tsx.", "ホーム画面を開く", "", []),
-        SentenceRecord("ja", 2, "From the home screen, go to Settings.", "ホーム画面から設定へ", "", []),
+        SentenceRecord(
+            "ja", 2, "From the home screen, go to Settings.", "ホーム画面から設定へ", "", []
+        ),
         SentenceRecord("ja", 3, "Run nimbus device list.", "Nimbus デバイス listを実行", "", []),
     ]
     fixes = {
-        0: {"source": "Nimbus Virtual Device", "wrong": "Nimbus仮想デバイス", "correct": "Nimbus Virtual Device"},
+        0: {
+            "source": "Nimbus Virtual Device",
+            "wrong": "Nimbus仮想デバイス",
+            "correct": "Nimbus Virtual Device",
+        },
         1: {"source": "home screen", "wrong": "ホーム画面", "correct": "home screen"},
-        3: {"source": "nimbus device list", "wrong": "Nimbus デバイス list", "correct": "nimbus device list"},
+        3: {
+            "source": "nimbus device list",
+            "wrong": "Nimbus デバイス list",
+            "correct": "nimbus device list",
+        },
     }
     sus = [{"kind": "mqm-major", "i": i, "detail": "x"} for i in fixes]
     pins, _ = harvest_term_pins(
-        recs, "ja", sus, classify=lambda c, s, t: next(f for i, f in fixes.items() if recs[i].src == s),
+        recs,
+        "ja",
+        sus,
+        classify=lambda c, s, t: next(f for i, f in fixes.items() if recs[i].src == s),
         curated={"Nimbus Virtual Device": "Nimbus仮想デバイス"},
     )
     assert [p["source"] for p in pins] == ["nimbus device list"]
@@ -1199,9 +1220,14 @@ def test_zh_interior_period_becomes_comma_and_no_line_end_comma():
     from dev_titles.config import spec_for
     from dev_titles.segment.cjk import normalize_zh_punct, wrap_lines
 
-    assert normalize_zh_punct("首先启用开发者模式。为此请打开终端。") == "首先启用开发者模式 为此请打开终端"
+    assert (
+        normalize_zh_punct("首先启用开发者模式。为此请打开终端。")
+        == "首先启用开发者模式 为此请打开终端"
+    )
     assert normalize_zh_punct("“Orbit TV才刚刚起步。”") == "“Orbit TV才刚刚起步”"
-    lines = wrap_lines("这是一个比较长的句子，需要在逗号处换行显示，然后继续说明后面的内容", spec_for("zh-Hans"))
+    lines = wrap_lines(
+        "这是一个比较长的句子，需要在逗号处换行显示，然后继续说明后面的内容", spec_for("zh-Hans")
+    )
     assert len(lines) > 1 and not any(ln.endswith("，") for ln in lines)
 
 
@@ -1211,8 +1237,12 @@ def test_vocab_latin_name_not_respelled():
     from dev_titles.vocab_prep import renderings_to_terms
 
     terms = renderings_to_terms(
-        {"zh-Hans": {"VS Code": {"canonical": "Visual Studio Code", "avoid": ["VS Code"]},
-                     "Ubuntu": {"canonical": "Ubuntu", "avoid": ["Ubuntu"]}}}
+        {
+            "zh-Hans": {
+                "VS Code": {"canonical": "Visual Studio Code", "avoid": ["VS Code"]},
+                "Ubuntu": {"canonical": "Ubuntu", "avoid": ["Ubuntu"]},
+            }
+        }
     )
     assert not terms
 
@@ -1225,8 +1255,10 @@ def test_vocab_terms_need_standalone_use_and_skip_curated():
 
     from dev_titles.vocab_prep import build_video_vocab, extract_lookup_terms
 
-    txt = ("Open Nimbus Studio and build Hello World. Press Enter. Choose a folder. "
-           "Then run Hello World in Nimbus Studio on the Nimbus Virtual device with Perfetto traces.")
+    txt = (
+        "Open Nimbus Studio and build Hello World. Press Enter. Choose a folder. "
+        "Then run Hello World in Nimbus Studio on the Nimbus Virtual device with Perfetto traces."
+    )
     terms = extract_lookup_terms(txt)
     assert "World" not in terms and "Press" not in terms and "Choose" not in terms
     assert "Perfetto" in terms
@@ -1237,11 +1269,19 @@ def test_vocab_terms_need_standalone_use_and_skip_curated():
         return json.dumps({})
 
     fetched = []
-    build_video_vocab(txt, lambda q: "", web_fetch=lambda u: fetched.append(u) or "",
-                      translate=translate,
-                      known=["Nimbus Studio", "Hello World", "Nimbus Virtual Device", "Nimbus"])
+    build_video_vocab(
+        txt,
+        lambda q: "",
+        web_fetch=lambda u: fetched.append(u) or "",
+        translate=translate,
+        known=["Nimbus Studio", "Hello World", "Nimbus Virtual Device", "Nimbus"],
+    )
     body = "\n".join(seen)
-    assert "- Nimbus Studio" not in body and "- Nimbus Virtual" not in body and "- Hello World" not in body
+    assert (
+        "- Nimbus Studio" not in body
+        and "- Nimbus Virtual" not in body
+        and "- Hello World" not in body
+    )
     assert not any("Perfetto" in u for u in fetched)  # single word: no Wikipedia sense lookup
 
 
@@ -1249,16 +1289,27 @@ def test_zh_han_space_han_is_a_clause_break():
     """A space between two Han chars is a sentence break (vendor convention); deleting it welded them."""
     from dev_titles.segment.cjk import normalize_zh_punct
 
-    assert normalize_zh_punct("我将在Mac上演示 不过如果您使用Ubuntu") == "我将在Mac上演示 不过如果您使用Ubuntu"
+    assert (
+        normalize_zh_punct("我将在Mac上演示 不过如果您使用Ubuntu")
+        == "我将在Mac上演示 不过如果您使用Ubuntu"
+    )
     assert normalize_zh_punct("使用 Nimbus Studio 扩展") == "使用Nimbus Studio扩展"
 
 
 def test_legacy_single_word_entity_pin_ignored():
     from dev_titles.vocab_prep import renderings_to_terms
 
-    t = renderings_to_terms({"ja": {"Rally": {"canonical": "ラリー", "avoid": ["Rally"]},
-                                    "Northwind Airlines": {"canonical": "ノースウィンド航空",
-                                                           "avoid": ["Northwind Airlines"]}}})
+    t = renderings_to_terms(
+        {
+            "ja": {
+                "Rally": {"canonical": "ラリー", "avoid": ["Rally"]},
+                "Northwind Airlines": {
+                    "canonical": "ノースウィンド航空",
+                    "avoid": ["Northwind Airlines"],
+                },
+            }
+        }
+    )
     assert [x.source for x in t] == ["Northwind Airlines"]
 
 
@@ -1266,9 +1317,15 @@ def test_zh_latin_list_separator_kept_and_no_line_start_comma():
     from dev_titles.config import spec_for
     from dev_titles.segment.cjk import normalize_zh_punct, wrap_lines
 
-    assert normalize_zh_punct("包括Nimbus、Orbit OS、Expo、Android") == "包括Nimbus、Orbit OS、Expo、Android"
+    assert (
+        normalize_zh_punct("包括Nimbus、Orbit OS、Expo、Android")
+        == "包括Nimbus、Orbit OS、Expo、Android"
+    )
     assert normalize_zh_punct("运行Nimbus OS。Expo也支持") == "运行Nimbus OS Expo也支持"
-    for ln in wrap_lines("现在单击Nimbus图标，然后单击“创建Nimbus项目”，接着单击Hello World，再为项目选择一个目录", spec_for("zh-Hans")):
+    for ln in wrap_lines(
+        "现在单击Nimbus图标，然后单击“创建Nimbus项目”，接着单击Hello World，再为项目选择一个目录",
+        spec_for("zh-Hans"),
+    ):
         assert not ln.startswith("，") and not ln.endswith("，")
 
 
@@ -1281,27 +1338,66 @@ def test_native_editor_accepts_only_guarded_and_judged_rewrites(tmp_path):
     from dev_titles.localize import SentenceRecord
 
     recs = [
-        SentenceRecord("ja", 0, "If nothing happens, nothing happens.", "何も起きなければ何も起きないだけです", "", []),
+        SentenceRecord(
+            "ja",
+            0,
+            "If nothing happens, nothing happens.",
+            "何も起きなければ何も起きないだけです",
+            "",
+            [],
+        ),
         SentenceRecord("ja", 1, "We ship 3 Acme builds.", "Acmeビルドを3つ出荷します", "", []),
     ]
     calls = {"edit": 0}
 
     def invoke(p):
         calls["edit"] += 1
-        return json.dumps([
-            {"id": 1, "issue": "literal tautology", "rewrite": "入力がなければ何も起こりません"},
-            {"id": 2, "issue": "x", "rewrite": "ビルドを出荷します"},  # drops Acme + 3 -> guard rejects
-        ])
+        return json.dumps(
+            [
+                {
+                    "id": 1,
+                    "issue": "literal tautology",
+                    "rewrite": "入力がなければ何も起こりません",
+                },
+                {
+                    "id": 2,
+                    "issue": "x",
+                    "rewrite": "ビルドを出荷します",
+                },  # drops Acme + 3 -> guard rejects
+            ]
+        )
 
-    judge = lambda p: json.dumps({"same_meaning": True, "better": "B" if "B: 入力" in p else "A", "why": ""})
+    judge = lambda p: json.dumps(
+        {"same_meaning": True, "better": "B" if "B: 入力" in p else "A", "why": ""}
+    )
     sp = tmp_path / "editor_state.ja.json"
-    changed = native_edit(recs, invoke, "ja", "Japanese", sp, normalize=lambda t, s=None: t,
-                          pair_judge=judge, logger=lambda m: None, seed=1)
+    changed = native_edit(
+        recs,
+        invoke,
+        "ja",
+        "Japanese",
+        sp,
+        normalize=lambda t, s=None: t,
+        pair_judge=judge,
+        logger=lambda m: None,
+        seed=1,
+    )
     assert changed == {0} and recs[0].txt == "入力がなければ何も起こりません"
     assert recs[1].txt == "Acmeビルドを3つ出荷します"
     n = calls["edit"]
-    assert native_edit(recs, invoke, "ja", "Japanese", sp, normalize=lambda t, s=None: t,
-                       pair_judge=judge, logger=lambda m: None) == set()
+    assert (
+        native_edit(
+            recs,
+            invoke,
+            "ja",
+            "Japanese",
+            sp,
+            normalize=lambda t, s=None: t,
+            pair_judge=judge,
+            logger=lambda m: None,
+        )
+        == set()
+    )
     assert calls["edit"] == n  # idempotent: nothing re-reviewed
     log = json.loads((tmp_path / "editor_log.ja.json").read_text())
     assert log[0]["before"] == "何も起きなければ何も起きないだけです"
@@ -1320,17 +1416,30 @@ def test_native_editor_rating_veto(tmp_path):
 
     def rate(p):  # current line OK, suggestion MEANING
         items = re.findall(r"(\d+)\. EN: .*\n   SUBTITLE: (.*)", p)
-        return json.dumps([{"id": int(n), "level": "MEANING" if "理念" in t else "OK"} for n, t in items])
+        return json.dumps(
+            [{"id": int(n), "level": "MEANING" if "理念" in t else "OK"} for n, t in items]
+        )
 
     def invoke(p):
         if "SUBTITLE:" in p:
             return rate(p)
         return json.dumps([{"id": 1, "issue": "x", "rewrite": "素晴らしい理念です"}])
 
-    judge = lambda p: rate(p) if "SUBTITLE:" in p else json.dumps(
-        {"same_meaning": True, "better": "B" if "B: 素晴らしい理念" in p else "A"})
-    changed = native_edit(recs, invoke, "ja", "Japanese", tmp_path / "editor_state.ja.json",
-                          normalize=lambda t, s=None: t, pair_judge=judge, logger=lambda m: None)
+    judge = lambda p: (
+        rate(p)
+        if "SUBTITLE:" in p
+        else json.dumps({"same_meaning": True, "better": "B" if "B: 素晴らしい理念" in p else "A"})
+    )
+    changed = native_edit(
+        recs,
+        invoke,
+        "ja",
+        "Japanese",
+        tmp_path / "editor_state.ja.json",
+        normalize=lambda t, s=None: t,
+        pair_judge=judge,
+        logger=lambda m: None,
+    )
     assert changed == set() and recs[0].txt == "素晴らしい将来性です"
     log = json.loads((tmp_path / "editor_log.ja.json").read_text())
     assert log[0]["status"] == "rejected" and "rated it worse" in log[0]["why"]
@@ -1349,7 +1458,9 @@ def test_native_editor_rescues_rewrite_every_judge_rates_better(tmp_path):
 
     def rate(p):
         items = re.findall(r"(\d+)\. EN: .*\n   SUBTITLE: (.*)", p)
-        return json.dumps([{"id": int(n), "level": "OK" if "気づき" in t else "NOTICEABLE"} for n, t in items])
+        return json.dumps(
+            [{"id": int(n), "level": "OK" if "気づき" in t else "NOTICEABLE"} for n, t in items]
+        )
 
     def invoke(p):
         if "SUBTITLE:" in p:
@@ -1358,8 +1469,16 @@ def test_native_editor_rescues_rewrite_every_judge_rates_better(tmp_path):
             return json.dumps({"same_meaning": False, "better": "A"})
         return json.dumps([{"id": 1, "issue": "calque", "rewrite": "大きな気づきがありました"}])
 
-    changed = native_edit(recs, invoke, "ja", "Japanese", tmp_path / "editor_state.ja.json",
-                          normalize=lambda t, s=None: t, pair_judge=invoke, logger=lambda m: None)
+    changed = native_edit(
+        recs,
+        invoke,
+        "ja",
+        "Japanese",
+        tmp_path / "editor_state.ja.json",
+        normalize=lambda t, s=None: t,
+        pair_judge=invoke,
+        logger=lambda m: None,
+    )
     assert changed == {0} and recs[0].txt == "大きな気づきがありました"
     log = json.loads((tmp_path / "editor_log.ja.json").read_text())
     assert log[0]["status"] == "accepted" and "rescued" in log[0]["why"]
@@ -1369,19 +1488,27 @@ def test_editor_quote_fix_and_zh_list_separators():
     from dev_titles.editor import fix_unbalanced_quotes
     from dev_titles.localize import zh_list_separators
 
-    assert fix_unbalanced_quotes("保留异议，全力执行”，我们就经常这么做") == "保留异议，全力执行，我们就经常这么做"
+    assert (
+        fix_unbalanced_quotes("保留异议，全力执行”，我们就经常这么做")
+        == "保留异议，全力执行，我们就经常这么做"
+    )
     assert fix_unbalanced_quotes("“保留异议”，全力执行") == "“保留异议”，全力执行"
     src = "You can learn from the JavaScript world, TypeScript world, ReScript, Java, Kotlin, iOS, C++."
-    assert zh_list_separators("从JavaScript TypeScript ReScript Java Kotlin iOS和C++的世界学习", src) == (
-        "从JavaScript、TypeScript、ReScript、Java、Kotlin、iOS和C++的世界学习"
+    assert zh_list_separators(
+        "从JavaScript TypeScript ReScript Java Kotlin iOS和C++的世界学习", src
+    ) == ("从JavaScript、TypeScript、ReScript、Java、Kotlin、iOS和C++的世界学习")
+    assert (
+        zh_list_separators("使用React Native开发", "We use React Native, Expo, and Hermes.")
+        == "使用React Native开发"
     )
-    assert zh_list_separators("使用React Native开发", "We use React Native, Expo, and Hermes.") == "使用React Native开发"
 
 
 def test_video_brief_uses_description_and_whole_transcript(tmp_path):
     from dev_titles.editor import video_brief, video_description
 
-    (tmp_path / "description.txt").write_text("Jane Roe, Senior Developer Advocate at Acme, interviews Bo.")
+    (tmp_path / "description.txt").write_text(
+        "Jane Roe, Senior Developer Advocate at Acme, interviews Bo."
+    )
     assert video_description(tmp_path).startswith("Jane Roe")
     prompts = []
 
@@ -1390,11 +1517,18 @@ def test_video_brief_uses_description_and_whole_transcript(tmp_path):
         return "brief"
 
     text = "word " * 6000  # 30k chars -> chunked notes, then the brief
-    b = video_brief(text, inv, tmp_path / "video_brief.txt", description=video_description(tmp_path))
+    b = video_brief(
+        text, inv, tmp_path / "video_brief.txt", description=video_description(tmp_path)
+    )
     assert b == "brief" and len(prompts) == 4  # 3 chunk notes + 1 brief
     assert "Senior Developer Advocate" in prompts[-1]
     n = len(prompts)
-    assert video_brief(text, inv, tmp_path / "video_brief.txt", description=video_description(tmp_path)) == "brief"
+    assert (
+        video_brief(
+            text, inv, tmp_path / "video_brief.txt", description=video_description(tmp_path)
+        )
+        == "brief"
+    )
     assert len(prompts) == n  # cached
     assert video_description(tmp_path / "missing") == ""
 
@@ -1406,22 +1540,48 @@ def test_qe_repair_protects_editor_rewrites_and_runs_accept_check():
     from dev_titles.translation_qe import qe_repair
 
     recs = [
-        SentenceRecord("ja", 0, "Pick the lowest common denominator.", "最も性能の低いデバイスに合わせる", "", []),
+        SentenceRecord(
+            "ja",
+            0,
+            "Pick the lowest common denominator.",
+            "最も性能の低いデバイスに合わせる",
+            "",
+            [],
+        ),
         SentenceRecord("ja", 1, "It's a great promise.", "素晴らしい可能性です", "", []),
     ]
     per_seg = {
-        0: {"claude": {"critical": 0, "major": 1, "minor": 0}, "codex": {"critical": 0, "major": 0, "minor": 0}},
-        1: {"claude": {"critical": 0, "major": 1, "minor": 0}, "codex": {"critical": 0, "major": 1, "minor": 0}},
+        0: {
+            "claude": {"critical": 0, "major": 1, "minor": 0},
+            "codex": {"critical": 0, "major": 0, "minor": 0},
+        },
+        1: {
+            "claude": {"critical": 0, "major": 1, "minor": 0},
+            "codex": {"critical": 0, "major": 1, "minor": 0},
+        },
     }
-    sus = [{"kind": "mqm-major", "i": 0, "detail": "narrowed"}, {"kind": "mqm-major", "i": 1, "detail": "promise"}]
+    sus = [
+        {"kind": "mqm-major", "i": 0, "detail": "narrowed"},
+        {"kind": "mqm-major", "i": 1, "detail": "promise"},
+    ]
     tried = []
 
     def retrans(rec, crit):
         tried.append(rec.i)
         return {0: "共通の最低基準に合わせる", 1: "素晴らしい約束です"}[rec.i]
 
-    fixed = qe_repair(recs, "ja", judges=[("claude", lambda p: "[]")], lang_name="Japanese", retranslate=retrans,
-                      per_seg=per_seg, judge_suspects=sus, protected={0},
-                      accept_check=lambda rec, old, new: False)
+    fixed = qe_repair(
+        recs,
+        "ja",
+        judges=[("claude", lambda p: "[]")],
+        lang_name="Japanese",
+        retranslate=retrans,
+        per_seg=per_seg,
+        judge_suspects=sus,
+        protected={0},
+        accept_check=lambda rec, old, new: False,
+    )
     assert 0 not in tried  # protected: only one judge flagged it
-    assert fixed == [] and recs[1].txt == "素晴らしい可能性です"  # accept_check rejected the literal sense
+    assert (
+        fixed == [] and recs[1].txt == "素晴らしい可能性です"
+    )  # accept_check rejected the literal sense

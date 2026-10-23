@@ -33,9 +33,7 @@ class YouTubePublisher:
             try:
                 from googleapiclient.discovery import build
             except ImportError as e:  # pragma: no cover
-                raise RuntimeError(
-                    "Install YouTube deps: pip install 'dev-titles[youtube]'"
-                ) from e
+                raise RuntimeError("Install YouTube deps: pip install 'dev-titles[youtube]'") from e
             self._service = build("youtube", "v3", credentials=self.credentials)
         return self._service
 
