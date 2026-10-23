@@ -3,6 +3,17 @@
 All notable changes to dev-titles. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and module APIs may still change).
 
+## [Unreleased]
+
+### Added
+- zh second-person referent pass: a "you" that means the guest's team (你们) or the viewers (大家),
+  or a generic possessive "your" (将您的应用 -> 将应用), no longer comes out as the 您 reserved for
+  the one person addressed. Guarded (only pronoun characters may change) and idempotent.
+
+### Changed
+- `translate_subtitle` split into cache / reuse / fresh-translation / cue-building helpers (no
+  behavior change; unit tests for cache reuse and the retry path).
+
 ## [0.2.2] — 2026-10-23
 
 ### Changed

@@ -377,3 +377,82 @@ def test_restore_question_mark():
     assert (
         rq("What have you been using?", "最近何を使っていますか", "ja") == "最近何を使っていますか"
     )
+
+
+def _sent(text, start=0.0, end=2.0):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(text=text, start=start, end=end)
+
+
+def test_reuse_record_index_then_source_then_retranslate():
+    """Cache reuse: same index + same source -> reuse; edited source at that index -> fall back
+    to the by-source index (segmentation shift) or None (re-translate)."""
+    from dev_titles.glossary import Glossary
+    from dev_titles.localize import SentenceRecord, _reuse_record
+
+    g = Glossary(version="t", languages=["ja", "zh-Hans"], terms=[])
+    norm = lambda t, s: t  # noqa: E731
+    old = SentenceRecord("ja", 0, "Hello there.", "こんにちは。", "", [])
+    moved = SentenceRecord("ja", 5, "Moved line.", "移動した行。", "", [])
+    cache, by_src = {0: old, 5: moved}, {old.src: old, moved.src: moved}
+    rec, _ = _reuse_record(0, _sent("Hello there."), cache, by_src, g, "ja", norm, print)
+    assert rec.txt == "こんにちは。" and rec.i == 0
+    rec, _ = _reuse_record(0, _sent("Moved line."), cache, by_src, g, "ja", norm, print)
+    assert rec.txt == "移動した行。" and rec.i == 0  # found by content at its new index
+    assert _reuse_record(0, _sent("Hello, LG."), cache, by_src, g, "ja", norm, print) is None
+
+
+def test_reuse_record_applies_current_normalizer():
+    """A reused translation goes through the CURRENT normalizer (register/punct), like fresh ones."""
+    from dev_titles.glossary import Glossary
+    from dev_titles.localize import SentenceRecord, _reuse_record
+
+    rec0 = SentenceRecord("zh-Hans", 0, "Thanks.", "谢谢你", "", [])
+    rec, _ = _reuse_record(
+        0,
+        _sent("Thanks."),
+        {0: rec0},
+        {rec0.src: rec0},
+        Glossary(version="t", languages=["ja", "zh-Hans"], terms=[]),
+        "zh-Hans",
+        lambda t, s: t.replace("你", "您"),
+        print,
+    )
+    assert rec.txt == "谢谢您"
+
+
+def test_translate_fresh_retries_then_succeeds(monkeypatch):
+    """A transient failure is retried; the second attempt's translation is kept."""
+    import dev_titles.localize as _loc
+    from dev_titles.config import spec_for
+    from dev_titles.glossary import Glossary
+
+    monkeypatch.setattr(_loc, "_SEGMENT_RETRY_BACKOFF", (0, 0))
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError("hung")
+        return "訳文", []
+
+    monkeypatch.setattr(_loc, "translate_segment", flaky)
+    monkeypatch.setattr(_loc, "_omission_gate", lambda tr, g, s, lang, txt, iss, *a: (txt, iss))
+    txt, iss, residual = _loc._translate_fresh(
+        0,
+        _sent("Hi."),
+        None,
+        Glossary(version="t", languages=["ja", "zh-Hans"], terms=[]),
+        "ja",
+        "Japanese",
+        spec_for("ja"),
+        ctx="",
+        exemplar_bank=None,
+        extra_dnt=[],
+        invoke=None,
+        backcheck=False,
+        edit_fix_rounds=0,
+        logger=lambda m: None,
+    )
+    assert (txt, residual, len(calls)) == ("訳文", "", 2)

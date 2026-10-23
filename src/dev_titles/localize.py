@@ -469,6 +469,154 @@ class SentenceRecord:
     issues: list[dict]
 
 
+def _load_cache(
+    cache_path, lang: str
+) -> tuple[dict[int, SentenceRecord], dict[str, SentenceRecord]]:
+    """The resumable cache for `lang`, indexed by sentence position AND by source text. The by-text
+    index makes reuse robust to SEGMENTATION SHIFTS: an EN edit that adds/removes a sentence
+    renumbers every later sentence, so an index-only lookup would miss all of them
+    (src != cache[i].src) and re-translate the whole tail. Keying unchanged source text by content
+    lets them reuse their existing translation regardless of their new index — only genuinely
+    new/edited text re-translates."""
+    cache: dict[int, SentenceRecord] = {}
+    cache_by_src: dict[str, SentenceRecord] = {}
+    p = Path(cache_path) if cache_path else None
+    if p is not None and p.exists():
+        for line in p.open(encoding="utf-8"):
+            if line.strip():
+                r = json.loads(line)
+                if r["lang"] == lang:
+                    rec0 = SentenceRecord(**r)
+                    cache[r["i"]] = rec0
+                    cache_by_src.setdefault(rec0.src, rec0)  # first wins (stable for dup lines)
+    return cache, cache_by_src
+
+
+def _reuse_record(i, s, cache, cache_by_src, g, lang, normalize, logger):
+    """A record rebuilt from the cache for this UNCHANGED source, or None to (re-)translate.
+
+    The cache is index-keyed, but REUSE ONLY IF THE SOURCE IS UNCHANGED. An operator EN correction
+    (e.g. 'Chile'->'LG') keeps the same sentence index, so an index-only reuse would ship the STALE
+    translation of the OLD text and never re-translate the fix; on any change, fall back to the
+    by-source index (a segmentation shift), else re-translate."""
+    reuse = cache[i] if (i in cache and cache[i].src == s.text) else cache_by_src.get(s.text)
+    if reuse is None:
+        return None
+    if stale_untranslated_reuse(reuse.txt, s.text, g, lang):
+        # A glossary fix made a term that this cached target left Latin now TRANSLATABLE
+        # (App Store -> 应用商店); enforce can't reverse it, so drop the reuse and re-translate
+        # THIS cue only. The cache self-heals against glossary changes without a full clear.
+        logger(
+            f"{lang}: cache-reuse stale #{i} (glossary now translates a Latin-left term) — re-translating"
+        )
+        return None
+    # Re-enforce against the CURRENT glossary (deterministic, no LLM) and APPLY its fixes —
+    # refreshes stale flags (pre-DNT 'Acme missing' FPs on 'Acme Q') AND normalizes same-cue
+    # avoid-forms to canonical (指导文件->引导文档), so a glossary change lands on cache reuse
+    # without a full re-translation.
+    rec = SentenceRecord(lang, i, s.text, reuse.txt, reuse.residual_miss, list(reuse.issues))
+    txt, iss = g.enforce(rec.txt, s.text, lang)
+    # Normalize like the fresh/TM paths — folds the register + punct on a REUSED translation;
+    # without it a segment cached under another register kept that register forever on reuse.
+    rec.txt = normalize(txt, s.text)
+    return rec, iss
+
+
+def _translate_fresh(
+    i,
+    s,
+    translator,
+    g,
+    lang,
+    lang_name,
+    spec,
+    *,
+    ctx,
+    exemplar_bank,
+    extra_dnt,
+    invoke,
+    backcheck,
+    edit_fix_rounds,
+    logger,
+):
+    """Translate one sentence: draft + reflect, omission gate, coverage edit-fix. Returns
+    (txt, issues, residual).
+
+    RESILIENCE: a single segment's LLM call can hang/time out (Bedrock under load, or a dropped
+    internet connection). RETRY with backoff first — a transient outage that recovers within ~30s
+    is survived here. Only after the retries are exhausted do we keep the EN placeholder + flag
+    it, rather than abort the whole multi-hour run (a crash here once lost a full ja pass)."""
+    import time as _time
+
+    # Soft budget with completeness headroom (1.15x): the tight cps budget pressured the model to
+    # DROP clauses; cps stays a review-only warning.
+    budget = max(
+        int(spec.max_cps * 1.15 * _budget_scale(lang) * max(s.end - s.start, spec.min_dur)), 12
+    )
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            txt, iss = translate_segment(
+                translator,
+                g,
+                s.text,
+                lang,
+                full_context=ctx,
+                reflect=True,
+                char_budget=budget,
+                exemplar_bank=exemplar_bank,
+                extra_dnt=extra_dnt,
+            )
+            txt, iss = _omission_gate(
+                translator, g, s, lang, txt, iss, ctx, budget, exemplar_bank, extra_dnt, logger, i
+            )
+            residual = ""
+            if backcheck:
+                txt, iss, residual = _coverage_editfix(
+                    invoke, g, s, lang, lang_name, txt, iss, edit_fix_rounds, logger, i
+                )
+            return txt, iss, residual
+        except Exception as e:
+            last_exc = e
+            if attempt < 2:
+                logger(
+                    f"{lang}: segment #{i} attempt {attempt + 1} failed "
+                    f"({type(e).__name__}); retrying"
+                )
+                _time.sleep(_SEGMENT_RETRY_BACKOFF[attempt])  # ride out a transient drop
+    name = type(last_exc).__name__
+    logger(
+        f"{lang}: segment #{i} translation FAILED ({name}) after retries — keeping EN, "
+        f"flagged for review"
+    )
+    return s.text, [], f"translation failed ({name}) — needs manual translation"
+
+
+def _build_lang_subtitle(
+    en, sents, records, spec, keep_together, speakers, conversational, issues, lang, logger
+):
+    """Shipping cues from the per-sentence records (free CJK segmentation or 1:1, see
+    resegment.build_target_cues), with the sync and validity reports logged."""
+    from .validate.sync import sync_report
+
+    cues = build_target_cues(
+        en, sents, [r.txt for r in records], spec, keep_together=keep_together, speakers=speakers
+    )
+    sub = Subtitle(lang, cues).renumber()
+    rep = validity_report(sub, conversational)
+    sync = sync_report(cues, en.cues)
+    if sync["drifted"]:
+        logger(
+            f"{lang}: WARNING out of sync with the speech — median {sync['median']} s, "
+            f"{sync['far_share']:.0%} of name anchors >3 s off (see validate/sync.py)"
+        )
+    logger(
+        f"{lang}: DONE {len(cues)} cues, {rep['cues_with_errors']} err-cues, "
+        f"{sum(1 for x in issues if x.kind == 'missing')} missing"
+    )
+    return sub
+
+
 def translate_subtitle(
     en: Subtitle,
     translator,
@@ -490,14 +638,15 @@ def translate_subtitle(
     Completeness gates (omission retry + coverage edit-fix) run when `invoke` (or
     `translator._invoke`) is available and `backcheck` is on. A `cache_path` JSONL
     makes the run resumable (per-(lang, sentence) records)."""
+    from .en_gloss import meaning_note
+    from .qa import protected_spans
+    from .speakers import speaker_note
+
     spec = spec_for(lang)
-    lang_name = _LANG_NAME.get(lang, lang)
     normalize = _normalizer(lang, conversational)
     g, extra_dnt = effective_glossary(glossary, video_vocab, conversational, lang=lang)
     # Auto-protect CLI commands / env vars found anywhere in this video as DNT (doc-global)
     # — they get partially translated/recased otherwise (create-expo-app -> create-expo-アプリ).
-    from .qa import protected_spans
-
     cmds = protected_spans(" ".join(c.text for c in en.cues))  # CLI commands + web domains
     extra_dnt = list(dict.fromkeys(list(extra_dnt) + cmds))
     keep_together = [
@@ -509,161 +658,51 @@ def translate_subtitle(
         logger(f"{lang}: no raw-invoke available — skipping completeness gates")
         backcheck = False
 
-    # resumable cache — indexed by sentence position AND by source text. The by-text index makes
-    # reuse robust to SEGMENTATION SHIFTS: an EN edit that adds/removes a sentence renumbers every
-    # later sentence, so an index-only lookup would miss all of them (src != cache[i].src) and
-    # re-translate the whole tail. Keying unchanged source text by content lets them reuse their
-    # existing translation regardless of their new index — only genuinely new/edited text re-translates.
-    cache: dict[int, SentenceRecord] = {}
-    cache_by_src: dict[str, SentenceRecord] = {}
-    cf = None
-    if cache_path:
-        p = Path(cache_path)
-        if p.exists():
-            for line in p.open(encoding="utf-8"):
-                if line.strip():
-                    r = json.loads(line)
-                    if r["lang"] == lang:
-                        rec0 = SentenceRecord(**r)
-                        cache[r["i"]] = rec0
-                        cache_by_src.setdefault(rec0.src, rec0)  # first wins (stable for dup lines)
-        cf = p.open("a", encoding="utf-8")
-
+    cache, cache_by_src = _load_cache(cache_path, lang)
+    cf = Path(cache_path).open("a", encoding="utf-8") if cache_path else None
     sents = merge_en_to_sentences(en)
     ctx = _ctx_for(sents, video_vocab)
-    _spk = _speakers_for(sents, video_vocab)
-    from .en_gloss import meaning_note
-    from .speakers import speaker_note
-
+    spk = _speakers_for(sents, video_vocab)
     logger(f"{lang}: {len(en.cues)} EN cues -> {len(sents)} sentences")
-    cues: list = []
     issues: list[EnforcementIssue] = []
     records: list[SentenceRecord] = []
 
     for i, s in enumerate(sents):
-        # Cache is index-keyed, but REUSE ONLY IF THE SOURCE IS UNCHANGED. An operator EN
-        # correction (e.g. 'Chile'->'LG') keeps the same sentence index, so an index-only reuse
-        # would ship the STALE translation of the OLD text and never re-translate the fix. Compare
-        # the cached source to the current one; on any change, fall through to re-translation.
-        reuse = cache[i] if (i in cache and cache[i].src == s.text) else cache_by_src.get(s.text)
-        if reuse is not None and stale_untranslated_reuse(reuse.txt, s.text, g, lang):
-            # A glossary fix made a term that this cached target left Latin now TRANSLATABLE
-            # (App Store -> 应用商店); enforce can't reverse it, so drop the reuse and re-translate
-            # THIS cue only. The cache self-heals against glossary changes without a full clear.
-            logger(
-                f"{lang}: cache-reuse stale #{i} (glossary now translates a Latin-left term) — re-translating"
-            )
-            reuse = None
-        if reuse is not None:
-            # Reuse the cached translation for this UNCHANGED source (same index, or moved by a
-            # segmentation shift). Re-enforce against the CURRENT glossary (deterministic, no LLM)
-            # and APPLY its fixes — refreshes stale flags (pre-DNT 'Acme missing' FPs on 'Acme
-            # Q') AND normalizes same-cue avoid-forms to canonical (指导文件->引导文档), so a glossary
-            # change lands on cache reuse without a full re-translation.
-            rec = SentenceRecord(
-                lang, i, s.text, reuse.txt, reuse.residual_miss, list(reuse.issues)
-            )
-            txt, iss = g.enforce(rec.txt, s.text, lang)
-            # Normalize like the fresh/TM paths (they call normalize; only this reuse branch used
-            # to skip it) — folds conversational 您->你 + punct on a REUSED translation. Without
-            # this, a segment cached under a non-conversational run keeps its formal 您 forever on
-            # reuse, so re-running --conversational never actually converted the register.
-            rec.txt = normalize(
-                txt, s.text
-            )  # keep records/QE/cues in sync with the normalized text
-            # Do NOT append content-reused records to the append-only cache: the translation is
-            # already persisted (under its original index) and on resume the by-source index
-            # re-finds it — re-appending would accumulate duplicate (src) entries across runs.
-        elif tm is not None and (hit := tm.exact(s.text, lang)) is not None:
-            # TM EXACT-MATCH REUSE: an identical source line already has an approved
-            # target — reuse it verbatim for cross-video consistency (no LLM, no gates).
-            txt, iss, residual = hit, [], ""
-            logger(f"{lang}: TM exact-match reuse #{i}")
-            txt = normalize(txt, s.text)
-            rec = SentenceRecord(lang, i, s.text, txt, residual, [])
-            if cf:
-                cf.write(json.dumps(rec.__dict__, ensure_ascii=False) + "\n")
-                cf.flush()
+        reused = _reuse_record(i, s, cache, cache_by_src, g, lang, normalize, logger)
+        if reused is not None:
+            # NOT re-appended to the append-only cache: the translation is already persisted
+            # (under its original index) and the by-source index re-finds it on resume.
+            rec, iss = reused
         else:
-            # Soft budget with completeness headroom (1.15x): the tight cps budget
-            # pressured the model to DROP clauses; cps stays a review-only warning.
-            budget = max(
-                int(spec.max_cps * 1.15 * _budget_scale(lang) * max(s.end - s.start, spec.min_dur)),
-                12,
-            )
-            # RESILIENCE: a single segment's LLM call can hang/time out (Bedrock under load,
-            # or a dropped internet connection). RETRY with backoff first — a transient outage
-            # that recovers within ~30s is survived here (so the segment gets a full-quality
-            # translation regardless of whether the QE-repair pass runs later). Only after the
-            # retries are exhausted do we keep the EN placeholder + flag it, rather than abort the
-            # whole multi-hour run. (A crash here previously lost a full ja pass at segment #4.)
-            import time as _time
-
-            txt, iss, residual = "", [], ""
-            last_exc: Exception | None = None
-            for _attempt in range(3):
-                try:
-                    _ctx_i = (
-                        ctx
-                        + speaker_note(i, _spk)
-                        + meaning_note(i, (video_vocab or {}).get("meaning_notes"))
-                    )
-                    txt, iss = translate_segment(
-                        translator,
-                        g,
-                        s.text,
-                        lang,
-                        full_context=_ctx_i,
-                        reflect=True,
-                        char_budget=budget,
-                        exemplar_bank=exemplar_bank,
-                        extra_dnt=extra_dnt,
-                    )
-                    txt, iss = _omission_gate(
-                        translator,
-                        g,
-                        s,
-                        lang,
-                        txt,
-                        iss,
-                        _ctx_i,
-                        budget,
-                        exemplar_bank,
-                        extra_dnt,
-                        logger,
-                        i,
-                    )
-                    residual = ""
-                    if backcheck:
-                        txt, iss, residual = _coverage_editfix(
-                            invoke, g, s, lang, lang_name, txt, iss, edit_fix_rounds, logger, i
-                        )
-                    last_exc = None
-                    break
-                except Exception as e:
-                    last_exc = e
-                    if _attempt < 2:
-                        logger(
-                            f"{lang}: segment #{i} attempt {_attempt + 1} failed "
-                            f"({type(e).__name__}); retrying"
-                        )
-                        _time.sleep(_SEGMENT_RETRY_BACKOFF[_attempt])  # ride out a transient drop
-            if last_exc is not None:
-                logger(
-                    f"{lang}: segment #{i} translation FAILED ({type(last_exc).__name__}) after "
-                    f"retries — keeping EN, flagged for review"
+            if tm is not None and (hit := tm.exact(s.text, lang)) is not None:
+                # TM EXACT-MATCH REUSE: an identical source line already has an approved
+                # target — reuse it verbatim for cross-video consistency (no LLM, no gates).
+                logger(f"{lang}: TM exact-match reuse #{i}")
+                txt, iss, residual = hit, [], ""
+            else:
+                txt, iss, residual = _translate_fresh(
+                    i,
+                    s,
+                    translator,
+                    g,
+                    lang,
+                    _LANG_NAME.get(lang, lang),
+                    spec,
+                    ctx=ctx
+                    + speaker_note(i, spk)
+                    + meaning_note(i, (video_vocab or {}).get("meaning_notes")),
+                    exemplar_bank=exemplar_bank,
+                    extra_dnt=extra_dnt,
+                    invoke=invoke,
+                    backcheck=backcheck,
+                    edit_fix_rounds=edit_fix_rounds,
+                    logger=logger,
                 )
-                txt, iss, residual = (
-                    s.text,
-                    [],
-                    f"translation failed ({type(last_exc).__name__}) — needs manual translation",
-                )
-            txt = normalize(txt, s.text)
             rec = SentenceRecord(
                 lang,
                 i,
                 s.text,
-                txt,
+                normalize(txt, s.text),
                 residual,
                 [
                     {"term": x.term, "kind": x.kind, "expected": x.expected, "detail": x.detail}
@@ -683,24 +722,8 @@ def translate_subtitle(
         # stale/duplicate (src) entries — e.g. 'Good, thank you.' translated twice at two indices —
         # which later trips the lossless audit even though the delivered file is correct.
         _rewrite_cache(cache_path, lang, records)
-    # Build shipping cues: FREE independent-timed CJK segmentation when opted in (default OFF
-    # during the 1:1 migration — see resegment.free_segment_default), else strict 1:1 EN-cue
-    # alignment (legacy: one target cue per EN cue, same timestamps).
-    cjk_texts = [r.txt for r in records]  # already normalized when built/cached
-    cues = build_target_cues(en, sents, cjk_texts, spec, keep_together=keep_together, speakers=_spk)
-    sub = Subtitle(lang, cues).renumber()
-    rep = validity_report(sub, conversational)
-    from .validate.sync import sync_report
-
-    _sync = sync_report(cues, en.cues)
-    if _sync["drifted"]:
-        logger(
-            f"{lang}: WARNING out of sync with the speech — median {_sync['median']} s, "
-            f"{_sync['far_share']:.0%} of name anchors >3 s off (see validate/sync.py)"
-        )
-    logger(
-        f"{lang}: DONE {len(cues)} cues, {rep['cues_with_errors']} err-cues, "
-        f"{sum(1 for x in issues if x.kind == 'missing')} missing"
+    sub = _build_lang_subtitle(
+        en, sents, records, spec, keep_together, spk, conversational, issues, lang, logger
     )
     return sub, issues, records
 
@@ -1125,7 +1148,7 @@ def _localize_en_impl(
     QE runs per language (deterministic always; a calibrated-DQF LLM MQM judge when `qe_judge`).
 
     Stages: video-level preparation once (brief, speakers, meaning notes, names policy), then per
-    language: translate -> condense (ja) -> native editor + reply check -> QE review ->
+    language: translate -> pronoun referents (zh) -> condense (ja) -> native editor + reply check -> QE review ->
     condensation revert -> QE repair -> term pins -> save QE state -> DNT auto-correct -> finalize.
     """
     run = _Run(
@@ -1153,6 +1176,7 @@ def _localize_en_impl(
     outputs: list[LangOutput] = []
     for lang in run.langs:
         L = _translate_lang(run, lang)
+        _pronoun_pass(run, L)
         _condense_pass(run, L)
         _editor_pass(run, L)
         _review_pass(run, L)
@@ -1300,6 +1324,27 @@ def _translate_lang(run: _Run, lang: str) -> _LangRun:
         logger=run.logger,
     )
     return L
+
+
+def _pronoun_pass(run: _Run, L: _LangRun) -> None:
+    """zh: who each English "you" means — generic / the addressee's team / the viewers get no
+    pronoun / 你们 / 大家 instead of the 您 reserved for one person. See dev_titles/zh_pronoun.py."""
+    if not (L.lang == "zh-Hans" and run.qe_invoke is not None and L.records):
+        return
+    from .zh_pronoun import pronoun_pass
+
+    chg = pronoun_pass(
+        L.records,
+        run.qe_invoke,
+        run.path(f"pronoun_state.{L.lang}.json"),
+        normalize=_normalizer(L.lang, run.conversational),
+        conversational=run.conversational,
+        logger=run.logger,
+    )
+    if chg:
+        _rewrite_cache(run.cache_path, L.lang, L.records)
+        kinds = sorted({c["referent"] for c in chg})
+        run.logger(f"{L.lang}: pronoun referents fixed in {len(chg)} line(s) ({', '.join(kinds)})")
 
 
 def _condense_pass(run: _Run, L: _LangRun) -> None:
