@@ -522,6 +522,7 @@ def translate_subtitle(
     sents = merge_en_to_sentences(en)
     ctx = _ctx_for(sents, video_vocab)
     _spk = _speakers_for(sents, video_vocab)
+    from .en_gloss import meaning_note
     from .speakers import speaker_note
     logger(f"{lang}: {len(en.cues)} EN cues -> {len(sents)} sentences")
     cues: list = []
@@ -591,7 +592,7 @@ def translate_subtitle(
             last_exc: Exception | None = None
             for _attempt in range(3):
                 try:
-                    _ctx_i = ctx + speaker_note(i, _spk)
+                    _ctx_i = ctx + speaker_note(i, _spk) + meaning_note(i, (video_vocab or {}).get("meaning_notes"))
                     txt, iss = translate_segment(
                         translator,
                         g,
@@ -674,6 +675,12 @@ def translate_subtitle(
     cues = build_target_cues(en, sents, cjk_texts, spec, keep_together=keep_together, speakers=_spk)
     sub = Subtitle(lang, cues).renumber()
     rep = validity_report(sub, conversational)
+    from .validate.sync import sync_report
+
+    _sync = sync_report(cues, en.cues)
+    if _sync["drifted"]:
+        logger(f"{lang}: WARNING out of sync with the speech — median {_sync['median']} s, "
+               f"{_sync['far_share']:.0%} of name anchors >3 s off (see validate/sync.py)")
     logger(
         f"{lang}: DONE {len(cues)} cues, {rep['cues_with_errors']} err-cues, "
         f"{sum(1 for x in issues if x.kind == 'missing')} missing"
@@ -836,9 +843,11 @@ def make_retranslate(
                 "\nLOCAL CONTEXT (for disambiguation only — do NOT translate these, only the "
                 f"line above): [previous] {prev!r}  [next] {nxt!r}"
             )
+        from .en_gloss import meaning_note
         from .speakers import speaker_note
 
-        _ctx_i = ctx + speaker_note(rec.i, _speakers_for(sents, video_vocab))
+        _ctx_i = (ctx + speaker_note(rec.i, _speakers_for(sents, video_vocab))
+                  + meaning_note(rec.i, (video_vocab or {}).get("meaning_notes")))
         txt, iss = translate_segment(
             translator,
             g,
@@ -1057,6 +1066,18 @@ def _localize_en_impl(
             _spk_all = []
         if _spk_all:
             video_vocab = {**(video_vocab or {}), "speakers": _spk_all}
+        # meaning notes: idioms / ambiguous phrases resolved ONCE in the English, shared by every language
+        from .en_gloss import meaning_notes
+
+        try:
+            _mn = meaning_notes(merge_en_to_sentences(en), qe_invoke,
+                                (_od / "meaning_notes.json") if _od else None, brief=_brief or "")
+        except Exception as e:  # never sink a run on it
+            logger(f"meaning notes skipped ({type(e).__name__})")
+            _mn = {}
+        if _mn:
+            video_vocab = {**(video_vocab or {}), "meaning_notes": _mn}
+            logger(f"meaning notes: {sum(len(v) for v in _mn.values())} phrase(s) resolved for the translators")
         # names policy: partner companies stay Latin; ordinary-word products get ONE rendering
         from .entities import apply_policy, names_policy
 
@@ -1179,6 +1200,7 @@ def _localize_en_impl(
                 register=str(_reg)[:300],
                 glossary_terms=_terms,
                 speakers=(video_vocab or {}).get("speakers") or None,
+                meaning_notes=(video_vocab or {}).get("meaning_notes") or None,
                 logger=logger,
             )
             if _ech:

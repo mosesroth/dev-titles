@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 from pathlib import Path
@@ -42,6 +43,11 @@ Flag ONLY lines a native viewer would notice as machine-made or wrong:
 - the wrong SPEAKER or addressee: when the English is tagged [speaker], a reply or reaction from
   the other person must read as theirs ("Thank you for having me" from a guest -> ja こちらこそ…,
   zh 也谢谢您的邀请), and "you" said to one guest is that person, not the audience;
+- ADDED material the English doesn't have: a filler (ja ええ, zh 嗯) where the speaker said nothing like it,
+  an "also" (ja も, zh 也) the English lacks, or an explicit noun for "it / them" when the previous line
+  already names it — remove it;
+- a line marked [means: …] in the English column that doesn't convey that meaning (those notes resolve
+  idioms and ambiguous phrases: "Bring it home" = make it concrete, not "wrap up");
 - stray or unbalanced quotation marks, leftover characters;
 - the AUDIENCE addressed as a single person: when the speaker talks to viewers / the room
   ("Are you interested in…?"), zh uses 大家 (not 您), ja uses 皆さん;
@@ -100,6 +106,10 @@ def load_examples(lang: str, path_tpl: str = "glossary/editor_examples.{lang}.js
     if not p.exists():
         return []
     rows = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    # evaluation hold-out: when re-translating an already-reviewed video to measure the harness, its
+    # own reviewed lines must not be in the prompt (SUBTITLE_HOLDOUT_VIDEOS=VideoA,VideoB)
+    held = {v.strip() for v in os.environ.get("SUBTITLE_HOLDOUT_VIDEOS", "").split(",") if v.strip()}
+    rows = [r for r in rows if r.get("video") not in held]
     return rows[:k]
 
 
@@ -273,6 +283,7 @@ def native_edit(
     batch=6,
     seed=17,
     speakers=None,
+    meaning_notes=None,
 ):
     """Run the native-editor pass over SentenceRecords in place. Returns the set of changed indices."""
     sp = Path(state_path) if state_path else None
@@ -300,7 +311,10 @@ def native_edit(
         for n, r in enumerate(chunk, 1):
             hints = deterministic_hints(r.txt, lang, r.src)
             who = f"[{speakers[r.i]}] " if speakers and r.i < len(speakers) and speakers[r.i] else ""
-            rows.append(f"{n} | {who}{r.src} | {r.txt}" + (f" | {', '.join(hints)}" if hints else ""))
+            from .en_gloss import meaning_tag
+
+            src = r.src + meaning_tag(r.i, meaning_notes)
+            rows.append(f"{n} | {who}{src} | {r.txt}" + (f" | {', '.join(hints)}" if hints else ""))
         prompt = EDIT_PROMPT.format(
             L=lang_name,
             brief=brief or "(none)",

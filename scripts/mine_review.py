@@ -50,10 +50,19 @@ def mine(video, lang, mdir, hdir):
     }
     en = _read_any(str(Path(mdir) / video / "en.vtt"), "en")
     hum = _read_any(str(Path(hdir) / f"{video}.{lang}.srt"), lang).cues
+    sents = merge_en_to_sentences(en)
+    # <hdir>/<video>.alignment.json (scripts/retime_drifted.py): the reviewer's text per EN sentence,
+    # aligned by CONTENT. Preferred over time windows, which mis-pair when the track drifted (the
+    # Sept 1:1 tracks were up to two cues off, so the window grabbed the neighbouring sentence).
+    ap = Path(hdir) / f"{video}.alignment.json"
+    aligned = json.loads(ap.read_text(encoding="utf-8")) if ap.exists() else None
+    if aligned is not None and len(aligned) != len(sents):
+        aligned = None
     out = []
-    for s in merge_en_to_sentences(en):
+    for k, s in enumerate(sents):
         m = norm(rec.get(s.text.strip()))
-        h = "".join(norm(c.text) for c in hum if s.start <= (c.start + c.end) / 2 < s.end)
+        h = (norm(aligned[k].replace("|", "")) if aligned is not None
+             else "".join(norm(c.text) for c in hum if s.start <= (c.start + c.end) / 2 < s.end))
         if not m or not h or m == h:
             continue
         r = difflib.SequenceMatcher(None, m, h, autojunk=False).ratio()

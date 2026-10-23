@@ -24,6 +24,23 @@ layout rules, validation and the guards that keep the LLM honest.
    spelled-out identifiers, drops filler and false starts, and corrects small grammar
    slips. It keeps technical meaning, numbers and identifiers. Builds an English master
    (42 characters per line, about 17 characters per second, at most 2 lines).
+
+   **Unscripted speech** (interviews, chats, panels) also gets a **deletion-only clean-read**:
+   stutters, false starts, self-corrections ("X, sorry, Y" → Y), filler and stray commas go; a cue
+   whose cleaned words aren't an in-order subset of the original is rejected, so it can't reword.
+   Scripted videos (tutorials, keynotes) are left as written. An LLM call decides which a video is
+   (cached in `en_style.json`); `--en-style scripted|unscripted` overrides it.
+2b. **English review and sign-off — a hard gate.** The EN review auto-applies clear errors and
+   HOLDS judgment calls. Nothing is translated until the exact English is signed off
+   (`en_approved.json`, bound to a hash of the EN; any later edit needs a new sign-off; no bypass
+   flag). Sign-off is automatic only when the review held nothing. Otherwise the run stops and
+   writes **`<out>/EN_LISTEN.html`**: one numbered item per held line with a YouTube link that
+   starts 2 s before it, our sentence with the flagged words highlighted, the reviewer's note, and
+   what Parakeet heard (if `<out>/parakeet.json` exists). Listen, fix `en.vtt`, then
+   `dev-titles approve-en <out> --en <file> --note "…"`. For technical words you can't judge by
+   ear (file, module or API names), check the screen at that moment. `scripts/triage_held_en.py`
+   builds the same page for already-delivered videos, using Parakeet plus YouTube's auto-captions
+   as two independent transcripts.
 3. **Translate EN to zh-Hans / ja** one whole sentence at a time, with the full transcript
    and a **video brief** as context. The brief names the speakers, their roles, the topic and
    any context-dependent jargon. It is built from the video description (saved at ingest,
@@ -35,7 +52,13 @@ layout rules, validation and the guards that keep the LLM honest.
    - a **translation memory** (exact-match reuse and series exemplars) plus few-shot
      exemplars mined from your own human-translated subtitles,
    - draft, reflect and refine, plus completeness gates (an omission retry and a coverage
-     edit-fix pass).
+     edit-fix pass),
+   - **meaning notes**: before any language is translated, one cached LLM pass lists the
+     phrases where a literal reading would be wrong — idioms ("bring it home" = make it
+     concrete), an everyday word in a less common sense ("two ways of having local models" =
+     obtaining), a line whose referent isn't what it says ("I was very out of date" = my old
+     phone). Each note goes with its sentence to every language and to the native editor. A
+     fresh-translation A/B against human finals found these same misreads in both languages.
 4. **Quality estimation.** Deterministic checks always run: omissions, dropped
    numbers/identifiers, and inconsistent terms. With `--qe-judge`, a **two-judge MQM
    panel** (Claude plus an optional OpenAI/Codex judge from a different model family)
@@ -78,7 +101,11 @@ layout rules, validation and the guards that keep the LLM honest.
    official rendering from the partner's site, else one consistent per-video choice. Each partner is
    looked up once and locked in `glossary/partners.yaml` (edit by hand to correct).
 8. **Validation.** Every cue is checked against the language's rules (duration, gaps,
-   lines, cps, cpl, punctuation). Errors block; warnings are flagged.
+   lines, cps, cpl, punctuation). Errors block; warnings are flagged. A **sync check**
+   (`validate/sync.py`) compares where Latin anchors (names, products) sit in the target vs the
+   English and warns when a track has drifted from the speech — cue-level checks can't see a
+   track that is well-formed but one sentence behind. `scripts/retime_drifted.py` re-times such a
+   track without changing its text (content alignment, verified character for character).
 9. **Review bundle.** You get the EN master, a VTT and an SRT for each language, and
    `REVIEW.md`, which lists validation results, glossary enforcement, QE findings, coverage
    residuals and suspect cues.
@@ -174,6 +201,17 @@ Once reviewers have corrected some of your subtitles, these scripts use their co
   acceptance gates against human reviews. Each suggestion is graded before and after by two
   graders from different model families, and the candidate gates are replayed. The current
   gate was chosen this way.
+
+- `scripts/check_vendor_review.py` checks a vendor's reviewed files for errors the review itself
+  introduced (a technical term in its everyday sense, casual English read literally, leftovers of
+  a rewrite). Protected glossary terms are checked deterministically; a proofreader proposes
+  fixes; each fix is applied only if it wins a **blind** comparison against the vendor's line
+  (two judges, both A/B orders). Use it when you can't send the delivery back.
+- `scripts/ab_vs_human.py` re-translates an already-reviewed video with the current harness
+  (held out: `SUBTITLE_HOLDOUT_VIDEOS`, TM / exemplar exclusion) and compares it per sentence to
+  the human final. Read only the "human better (both judges)" lines as actionable: similarity
+  scores favour the old draft the human edited from, and LLM judges favour machine text.
+- `scripts/cleanread_en.py` runs the deletion-only clean-read on an existing EN track.
 
 For multi-hour jobs launched from an agent session, use `scripts/run_detached.py`. It
 detaches the job into its own session so the job outlives the agent's turn.

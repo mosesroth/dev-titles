@@ -201,7 +201,7 @@ def _persist_term_pins(outputs, out) -> None:
             print(f"    [{lang}] {src!r} -> {spec['canonical']!r} (avoid {spec.get('avoid', [])})")
 
 
-def _en_review(en, out, title: str = ""):
+def _en_review(en, out, title: str = "", en_style: str | None = None):
     """General editorial review of the EN script (spelling, grammar, terminology, garbled
     phrasing) — the standard proofread any script gets, run on ANY EN source (a human transcript
     carries errors too, e.g. OpenTelemetry/'open telemetry').
@@ -218,20 +218,56 @@ def _en_review(en, out, title: str = ""):
 
     rpath = Path(out) / "en_review.md"
     if rpath.exists():
+        # a re-run: translate the CORRECTED EN this step saved (clean-read / review fixes), not the input
+        saved = Path(out) / "en.vtt"
+        if saved.exists() and (Path(out) / "en.orig.vtt").exists():
+            return _read_any(str(saved), "en")
         return en
+    from .en_cleanread import clean_read, speech_style
     from .transcribe_qe import en_autofix
     from .transcribe_qe import en_review as _rev
     from . import llm
 
     invoke = llm.invoke()
+    # CLEAN-READ unscripted speech first (deletions / punctuation only), so the review and the sign-off
+    # see the cleaned script. Scripted videos (tutorials, keynotes) are left as written.
+    style = speech_style(en, invoke, title, Path(out) / "en_style.json", override=en_style)
+    cleaned, _rej = [], 0
+    if style["style"] == "unscripted":
+        try:
+            en_c, cleaned, _rej = clean_read(en, invoke)
+        except Exception as e:
+            print(f"EN clean-read skipped ({type(e).__name__})")
+            en_c = en
+        if cleaned:
+            p = Path(out) / "en.vtt"
+            if p.exists() and not (Path(out) / "en.orig.vtt").exists():
+                (Path(out) / "en.orig.vtt").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+            elif not (Path(out) / "en.orig.vtt").exists():
+                (Path(out) / "en.orig.vtt").write_text(write_vtt(en), encoding="utf-8")
+            p.write_text(write_vtt(en_c), encoding="utf-8")
+            en = en_c
+        print(f"EN clean-read ({style['style']}: {style['why']}): {len(cleaned)} cue(s) cleaned, {_rej} rejected")
+    else:
+        print(f"EN clean-read skipped: scripted ({style['why']})")
+    cr_lines = [f"## Clean-read ({style['style']}: {style['why']}) — {len(cleaned)} cue(s), deletions only", ""]
+    cr_lines += ([f"| {int(c['start']) // 60:02d}:{int(c['start']) % 60:02d} | {c['old']!r} | {c['new']!r} |" for c in cleaned]
+                 if cleaned else ["_None._"])
+    cr_lines = (cr_lines[:2] + ["| Time | Before | After |", "|---|---|---|"] + cr_lines[2:]) if cleaned else cr_lines
+    cr_lines.append("")
+    from . import en_gate
+
     try:
         issues = _rev(en, invoke)
     except Exception as e:
-        print(f"EN review skipped ({type(e).__name__})")
+        print(f"EN review FAILED ({type(e).__name__}) — translation is blocked until it runs")
+        en_gate.save_review_state(out, "failed", [])
         return en
     if not issues:
+        en_gate.save_review_state(out, "ok", [])
         rpath.write_text(
-            f"# EN editorial review — {title}\n\nNo editorial issues flagged.\n", encoding="utf-8"
+            f"# EN editorial review — {title}\n\n" + "\n".join(cr_lines) + "\nNo editorial issues flagged.\n",
+            encoding="utf-8",
         )
         print("EN review: no editorial issues flagged.")
         return en
@@ -252,6 +288,7 @@ def _en_review(en, out, title: str = ""):
         "EN (original saved as en.orig.vtt); the rest are held for you to adjudicate.",
         "",
     ]
+    lines += cr_lines
     lines += [f"## Auto-applied clear-error fixes ({len(applied)})", ""]
     if applied:
         lines += ["| Time | Kind | Fix | Corrected cue |", "|---|---|---|---|"]
@@ -267,6 +304,9 @@ def _en_review(en, out, title: str = ""):
     else:
         lines += ["_None._"]
     rpath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    en_gate.save_review_state(
+        out, "ok", [{k: s.get(k, "") for k in ("ts", "kind", "detail")} for s in held], len(applied)
+    )
     print(f"EN review: {len(applied)} auto-applied, {len(held)} held -> {rpath}")
     return new_en
 
@@ -329,7 +369,11 @@ def cmd_localize(args) -> int:
         en = build_en_cues(transcript)
     cache = None if args.no_cache else str(out / "cache.jsonl")
     bank_for = _exemplar_bank_for(args, langs)
-    en = _en_review(en, out, args.input)
+    en = _en_review(en, out, args.input, getattr(args, "en_style", None))
+    from . import en_gate
+
+    if not en_gate.require(en, out, args.input):
+        return 3
     print(
         f"Localizing {args.input} -> {', '.join(langs)} (glossary={args.glossary}"
         f"{', vocab=' + args.vocab if args.vocab else ''})…"
@@ -667,6 +711,9 @@ def cmd_run(args) -> int:
     ri = resolve_input(args.input, workdir=str(Path(args.out) / "_ingest"))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    if str(args.input).startswith(("http://", "https://")) and not (out / "SOURCE-URL.txt").exists():
+        # the source link: listen-list pages (EN_LISTEN.html), held-out exclusion and publishing use it
+        (out / "SOURCE-URL.txt").write_text(str(args.input).strip() + "\n", encoding="utf-8")
     want_tx = not args.translate_only
     want_tr = not args.transcribe_only
     glossary = load_glossary(args.glossary)
@@ -1002,7 +1049,11 @@ def cmd_run(args) -> int:
     # 2) Translate the EN master.
     langs = args.lang or ["zh-Hans", "ja"]
     bank_for = _exemplar_bank_for(args, langs)
-    en = _en_review(en, out, ri.title or ri.path)
+    en = _en_review(en, out, ri.title or ri.path, getattr(args, "en_style", None))
+    from . import en_gate
+
+    if not en_gate.require(en, out, str(out / "en.vtt")):
+        return 3
     print(f"Localizing -> {', '.join(langs)}…")
     _save_description_file(args)
     outputs = localize_en(
@@ -1026,6 +1077,24 @@ def cmd_run(args) -> int:
     _persist_term_pins(outputs, out)
     written = build_review_bundle(out, en, outputs)
     print(f"Wrote {len(written)} files to {out}/")
+    return 0
+
+
+def cmd_approve_en(args) -> int:
+    import getpass
+
+    from . import en_gate
+
+    en_path = args.en or str(Path(args.out) / "en.vtt")
+    en = _read_any(en_path, "en")
+    status, held = en_gate.review_state(args.out)
+    if status != "ok":
+        print(f"Cannot sign off: the EN review has not run successfully (status: {status}).")
+        return 3
+    for h in held:
+        print(f"  held {h.get('ts', '?'):>6}  {h.get('kind', '')}: {h.get('detail', '')}")
+    rec = en_gate.approve(args.out, en, by=getpass.getuser(), note=args.note)
+    print(f"EN signed off: {en_path} ({len(held)} held line(s) resolved by {rec['by']}, {rec['at']})")
     return 0
 
 
@@ -1115,6 +1184,12 @@ def main(argv=None) -> int:
         "run", help="one entry: input (file/YouTube URL) -> transcribe and/or translate"
     )
     rn.add_argument("input", help="local media/subtitle file OR a YouTube URL")
+    rn.add_argument(
+        "--en-style",
+        choices=["scripted", "unscripted"],
+        help="override the scripted/unscripted call that decides whether the EN gets a clean-read "
+        "(unscripted: stutters/filler removed, deletions only; scripted e.g. tutorials: left as written)",
+    )
     rn.add_argument("--out", required=True, help="output directory")
     rn.add_argument(
         "--lang",
@@ -1270,6 +1345,12 @@ def main(argv=None) -> int:
     rn.set_defaults(func=cmd_run)
 
     lo = sub.add_parser("localize", help="EN subtitle -> zh-Hans/ja review-ready cues + bundle")
+    lo.add_argument(
+        "--en-style",
+        choices=["scripted", "unscripted"],
+        help="override the scripted/unscripted call that decides whether the EN gets a clean-read "
+        "(unscripted: stutters/filler removed, deletions only; scripted e.g. tutorials: left as written)",
+    )
     lo.add_argument("input", help="EN master subtitle (.vtt/.srt/.sbv)")
     lo.add_argument("--out", required=True, help="output bundle directory")
     lo.add_argument(
@@ -1435,6 +1516,15 @@ def main(argv=None) -> int:
         help="show what WOULD promote without editing the glossary",
     )
     pt.set_defaults(func=cmd_promote_terms)
+
+    ap = sub.add_parser(
+        "approve-en",
+        help="sign off the English script (after resolving every held EN-review line) so it can be translated",
+    )
+    ap.add_argument("out", help="the video's output dir (holds en_review.json)")
+    ap.add_argument("--en", help="the EN file that will be translated (default <out>/en.vtt)")
+    ap.add_argument("--note", default="", help="what was resolved, for the record")
+    ap.set_defaults(func=cmd_approve_en)
 
     args = p.parse_args(argv)
     from . import llm

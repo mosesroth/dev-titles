@@ -56,7 +56,17 @@ def video_id_from_input(input_str: str) -> str:
         return m.group(1)
     stem = Path(input_str).stem
     # channel human files are '<id>.en' etc. — strip a lang suffix if present
-    return re.sub(r"\.(en|ja|zh(-Hans|-CN)?)$", "", stem)
+    vid = re.sub(r"\.(en|ja|zh(-Hans|-CN)?)$", "", stem)
+    if vid in ("en", "en.orig", "ja", "zh-Hans", ""):
+        # '<video dir>/en.vtt' (every ticket run): the stem says nothing — the held-out exclusion
+        # silently matched no video. Use the dir's SOURCE-URL.txt (a YouTube id), else the dir name.
+        src = Path(input_str).parent / "SOURCE-URL.txt"
+        if src.exists():
+            m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", src.read_text(encoding="utf-8"))
+            if m:
+                return m.group(1)
+        return Path(input_str).parent.name
+    return vid
 
 
 def build_exemplar_banks(

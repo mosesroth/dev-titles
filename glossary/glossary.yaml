@@ -192,10 +192,80 @@ terms:
     notes: "ja: 更新 over アップデート. Product names containing 'Update' keep their own rendering."
   - source: "the web"
     aliases: ["web"]
+    zh-Hans: "网页"
     ja: "ウェブ"
     enforce: soft
     notes: "The PLATFORM/medium sense only — 'Web' inside a product or API name (WebView,
-      react-native-web) is DNT and protected by the identifier masking."
+      react-native-web) is DNT and protected by the identifier masking. zh reviewers write 网页
+      (网页端 for 'on the web' as a platform), never Latin 'Web'."
+  - source: "on-device"
+    aliases: ["on device"]
+    zh-Hans: "设备端"
+    enforce: soft
+    avoid:
+      zh-Hans: ["端侧"]
+    notes: "zh reviewers: 设备端 (incl. on-device AI -> 设备端AI), not 端侧."
+  - source: "server-side"
+    aliases: ["server side"]
+    zh-Hans: "服务器端"
+    enforce: soft
+    avoid:
+      zh-Hans: ["服务端"]
+    notes: "e.g. server-side rendering -> 服务器端渲染."
+  - source: "server function"
+    aliases: ["server functions"]
+    zh-Hans: "服务器函数"
+    ja: "サーバー関数"
+    enforce: soft
+    avoid:
+      zh-Hans: ["服务器功能"]
+    notes: "A function that runs on the server — a code term, so 函数, not 功能 ('feature')."
+  - source: "strongly typed"
+    zh-Hans: "强类型"
+    enforce: soft
+    avoid:
+      zh-Hans: ["重型"]
+  - source: "schema"
+    aliases: ["schemas"]
+    zh-Hans: "schema"
+    ja: "スキーマ"
+    enforce: soft
+    avoid:
+      zh-Hans: ["方案"]
+    notes: "Data / API schema. zh: Latin 'schema' (架构 / 模式 also seen); never 方案 ('plan')."
+  - source: "hook"
+    aliases: ["hooks", "React hook", "React hooks", "custom hook", "custom hooks"]
+    zh-Hans: "Hook"
+    ja: "フック"
+    enforce: soft
+    avoid:
+      zh-Hans: ["挂钩"]
+    notes: "React hooks. zh: the official Chinese React docs (zh-hans.react.dev) keep 'Hook' Latin, even
+      for plurals; dev sites write Hooks, glossed 钩子. 挂钩 is the Win32 term and absent from React
+      usage. Agent / Git hooks: 钩子 is fine."
+  - source: "token"
+    aliases: ["tokens", "LLM token", "LLM tokens", "AI tokens"]
+    zh-Hans: "词元"
+    enforce: soft
+    avoid:
+      zh-Hans: ["令牌"]
+    notes: "AI / LLM sense only. China's national terminology committee (全国科学技术名词审定委员会,
+      2026-03-25) designated 词元 the trial-use Chinese name for the AI term token. Authentication
+      tokens (OAuth / API keys / JWT) stay 令牌."
+  - source: "brownfield"
+    aliases: ["Brownfield", "brownfield app", "brownfield apps"]
+    zh-Hans: "Brownfield"
+    ja: "Brownfield"
+    enforce: soft
+    avoid:
+      zh-Hans: ["棕地"]
+      ja: ["ブラウンフィールド"]
+    notes: "Integrating React Native into an existing native app. Reviewers in both languages keep it Latin."
+  - source: "footprint"
+    aliases: ["app footprint", "the footprint of apps"]
+    zh-Hans: "资源占用"
+    enforce: soft
+    notes: "An app's size / resource use — 资源占用, not 体量 (bulk)."
   - source: "use case"
     aliases: ["use cases"]
     ja: "用途"
@@ -375,6 +445,12 @@ style:
       DISCOURSE FILLERS: OMIT interview filler that carries no content — "Yeah,", "So,",
       "Well,", "I mean", "you know" — do NOT render it as ええ / はい / そうですね / なるほど.
       Keep はい only when it genuinely answers a yes/no question.
+      REPLIES: "Okay, okay." / "I see." taking in new information -> なるほど (わかりました sounds like
+      accepting an instruction); "Sure." answering a question -> はい (もちろんです only when emphatic);
+      a confirming question ends in 〜んですか. "Thanks for joining (us)" at a live event or interview ->
+      ご参加…; ご視聴 only for "thanks for watching". KEEP hedges that change a claim (pretty much ->
+      ほぼ, probably -> おそらく) and continuing action ("we've been running X since…" -> 〜してきました).
+      NO ADDED MATERIAL: no ええ, no も ("also"), no explanation the English doesn't give.
       PRESENTATION REGISTER: "Today" -> 本日は (never casual 今日は); "I'll cover" -> ご紹介します;
       "support" -> サポートします (not 対応します); do NOT stack verbs with 中黒 as an MT-style
       compound (直接実行・デバッグできます); split long "do this, do that, and this" sentences;
@@ -401,6 +477,15 @@ style:
       你们 survived), so 您 is the house default — polite to the guest and the audience, not
       chummy. All other rules below (de-calque, pronoun economy, specificity, punctuation)
       still apply.
+      GENERIC "YOU": when "you / your" means anyone or developers in general ("you can speed up
+      logging in with adb", "package your app as a framework"), OMIT the pronoun —
+      可以用adb命令加快登录应用的速度, 将应用打包为框架 — never 您可以 / 您的应用 for the generic you.
+      您 is for talking TO a specific person (the guest, the host).
+      SPOKEN REGISTER (interviews / chats): write the way people talk, not written Chinese — 聊 (talk
+      about, not 讲), 有 ("we have", not 提供了 unless it really means provide), 好用 (a good tool), 还不少
+      (plenty), 对 for a direct "Yes." answer (an interviewer's reflex "yeah" is still 嗯 / dropped);
+      prefer short direct clauses to written connectors (借助…，可供…，以…方式). Casual asides stay
+      casual.
     notes: >-
       REGISTER: formal written; address the reader as 您 consistently — NEVER 你.
       BACK-CHANNEL: an interviewer's reflex "Yeah / Right / Sure" is 嗯 (or dropped) — not
@@ -411,7 +496,9 @@ style:
       为您提供 — Chinese drops obvious pronouns (it/they/we/our too). "as you can see" ->
       可以看到, never 如您所见.
       SPECIFICITY: viewers see one cue at a time, so resolve antecedents to the named thing
-      (React Native核心 over Core, 全部工具 over 一切).
+      (React Native核心 over Core, 全部工具 over 一切) — BUT don't re-name what the previous line just
+      named ("With this, you can quickly get them open" after a line about the simulators ->
+      用这个就能快速将它们打开). NO ADDED MATERIAL: nothing the English doesn't say.
       PUNCTUATION: no 。 (the cue/line break ends the sentence; a mid-line sentence break is a
       single space); use ， between clauses of one sentence (~2 per 100 chars) so long cues
       don't read as run-ons. No punctuation at a line END except ？, quotes and brackets.
@@ -453,6 +540,7 @@ heuristics: >-
 # performMountingInstructions); (b) they are do-not-translate — masked at translate time and
 # kept Latin in ja/zh. Add your own product names / coined terms here.
 identifiers:
+  - Create React App
   - OpenTelemetry   # observability standard; DNT. Also clears a latin-typo FP (source spells
                     # it "open telemetry" 2-word while target keeps the 1-word compound).
   - OTLP
