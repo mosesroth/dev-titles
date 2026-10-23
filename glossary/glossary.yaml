@@ -261,6 +261,21 @@ terms:
       zh-Hans: ["棕地"]
       ja: ["ブラウンフィールド"]
     notes: "Integrating React Native into an existing native app. Reviewers in both languages keep it Latin."
+  - source: "React Foundation"
+    aliases: ["the React Foundation"]
+    zh-Hans: "React基金会"
+    ja: "React Foundation"
+    enforce: soft
+    avoid:
+      ja: ["React財団"]
+    notes: "Official names on React's own sites: zh-hans.react.dev 'React 基金会', ja.react.dev 'React
+      Foundation' (names policy: the organization's own localized name)."
+  - source: "Linux Foundation"
+    aliases: ["the Linux Foundation"]
+    zh-Hans: "Linux基金会"
+    ja: "Linux Foundation"
+    enforce: soft
+    notes: "zh-hans.react.dev 'Linux 基金会', ja.react.dev 'Linux Foundation'."
   - source: "footprint"
     aliases: ["app footprint", "the footprint of apps"]
     zh-Hans: "资源占用"
@@ -418,6 +433,17 @@ terms:
 style:
   ja:
     register: teineigo        # です・ます (敬体) throughout — never plain form
+    # Interviews / conversations only (applied when the run is conversational, before `notes`).
+    notes_conversational: >-
+      SPOKEN REGISTER (interviews / conversations — overrides any presentation-register rule below):
+      write the way people speak in a polite conversation, not a manual or a spec. Everyday verbs:
+      使って (not 使用して), 選べます (not オプションを選択できます), 登録できます / 入れられます (not 入力できます
+      for settings), 起動 for opening an app. Explanations and confirmations sound spoken: 〜んです /
+      〜わけですね / 〜んですか. No stiff これは…を使って行っていました — say adbを使っていたんです. No redundant
+      pairs (独自のカスタムコマンド -> 独自のコマンド). Spell terms out the way the speaker says them:
+      オープンソースプロジェクト, never the abbreviation OSS.
+      CLOSING THANKS: "So thanks for joining (today)" at the END of the conversation is past tense:
+      本日はご参加いただきありがとうございました.
     notes: >-
       PUNCTUATION: write 、 and 。 normally — the normalizer converts 読点 、 to a half-width
       space and 句点 。 to a full-width space (the common Japanese subtitle convention). Omit
@@ -477,6 +503,8 @@ style:
       你们 survived), so 您 is the house default — polite to the guest and the audience, not
       chummy. All other rules below (de-calque, pronoun economy, specificity, punctuation)
       still apply.
+      CLOSING THANKS: "thanks for joining (today)" -> 感谢各位今天的参与 — not 能来 / 到场, which mean
+      physical attendance.
       GENERIC "YOU": when "you / your" means anyone or developers in general ("you can speed up
       logging in with adb", "package your app as a framework"), OMIT the pronoun —
       可以用adb命令加快登录应用的速度, 将应用打包为框架 — never 您可以 / 您的应用 for the generic you.

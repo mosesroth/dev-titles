@@ -67,14 +67,47 @@ def strip_nonspeech_cues(transcript: Transcript) -> Transcript:
     return Transcript(language=transcript.language, words=kept)
 
 
-# Cue-level sound tags in an imported caption. Restricted to NON-SPEECH words so a real
-# parenthetical in speech ("Single Sign-On (SSO)") is never removed.
+# Cue-level sound tags in an imported caption: a [bracket] or (parenthesis) whose words are ALL
+# sound-description vocabulary and include at least one sound word — "[music]", "[MUSIC PLAYING]",
+# "(light music continues)", "[applause and cheering]", "[ Music ]" — or "[speaking Japanese]".
+# VOCABULARY-bound on purpose: square brackets also mark UI names ([Build], [OK], [Next]) and a
+# parenthetical can be speech ("Single Sign-On (SSO)"); neither has a sound word, so neither is
+# touched. (The first, list-of-exact-forms version missed most real variants.)
+_SOUND_WORDS = (
+    r"music|musik|musique|song|singing|sings|humming|hums|applause|applauding|clapping|claps|"
+    r"laughter|laughs|laughing|chuckles|chuckling|giggles|cheering|cheers|whooping|sighs|sighing|"
+    r"coughs|coughing|gasps|inaudible|indistinct|crosstalk|silence|noise|noises|sound|sounds|"
+    r"instrumental|beep|beeps|beeping|bell|bells|chime|chimes|whistle|whistling|static|audio|"
+    r"piano|guitar|drums|drumming|bgm|sfx"
+)
+_SOUND_MODIFIERS = (
+    r"upbeat|soft|gentle|background|light|bright|dramatic|thoughtful|loud|quiet|calm|cheerful|"
+    r"energetic|mellow|ambient|electronic|acoustic|inspiring|inspirational|suspenseful|playful|"
+    r"intro|outro|theme|closing|opening|audience|crowd|people|all|and|playing|plays|continues|"
+    r"continuing|fades|fading|ends|ending|starts|begins|out|in|up|no|the|a|of|music's|tense|warm|"
+    r"lively|relaxing|corporate|techno|pop|jazz|rock|hip|hop|lo-fi|lofi|indistinctly|softly"
+)
+_SW = rf"(?:{_SOUND_WORDS})"
+_SM = rf"(?:{_SOUND_WORDS}|{_SOUND_MODIFIERS})"
 _SOUND_TAG = re.compile(
-    r"\s*[\[(](?:upbeat |soft |gentle |background |light |dramatic )?"
-    r"(?:music|applause|laughter|laughs|laughing|cheering|cheers|inaudible|silence|crosstalk|"
-    r"chuckles|chuckling|sighs|coughs|beep|bell|noise|sound|instrumental)[\])]\s*|\s*♪+[^♪]*♪*\s*",
+    rf"\s*[\[(]\s*(?:(?:{_SM}[\s,]+)*{_SW}(?:[\s,]+{_SM})*|speaking\s+[A-Za-z]+)\s*[\])]\s*"
+    r"|\s*♪+[^♪]*♪*\s*",
     re.IGNORECASE,
 )
+# the same tags once translated ([音乐] / ［音楽］ / （掌声）); a ja （笑） is a reviewer's choice, not here
+CJK_SOUND_TAG = re.compile(
+    r"\s*[\[［【(（]\s*(?:背景)?(?:音乐|音楽|BGM|掌声|拍手|欢呼|歓声|笑声|音效|効果音)[^\]］】)）]{0,6}[\]］】)）]\s*"
+)
+# YouTube-caption speaker-change markers (">> Welcome…"); never part of our subtitles
+SPEAKER_MARK = re.compile(r"^\s*(?:>>|&gt;&gt;)\s*")
+
+
+def strip_artifacts(line: str) -> str:
+    """One subtitle line without sound tags or '>>' markers (whitespace tidied only if one was removed)."""
+    if not (_SOUND_TAG.search(line) or CJK_SOUND_TAG.search(line) or SPEAKER_MARK.match(line)):
+        return line
+    line = SPEAKER_MARK.sub("", _SOUND_TAG.sub(" ", CJK_SOUND_TAG.sub(" ", line)))
+    return re.sub(r" {2,}", " ", line).strip()
 
 
 def strip_sound_tags(sub: Subtitle) -> Subtitle:
@@ -84,7 +117,7 @@ def strip_sound_tags(sub: Subtitle) -> Subtitle:
     translation (BuilderToolsAI ja got '[音楽]'). A cue left empty is dropped."""
     out = []
     for c in sub.cues:
-        lines = [re.sub(r" {2,}", " ", _SOUND_TAG.sub(" ", ln)).strip() for ln in c.lines]
+        lines = [strip_artifacts(ln) for ln in c.lines]
         lines = [ln for ln in lines if ln]
         if lines:
             out.append(Cue(start=c.start, end=c.end, lines=lines))

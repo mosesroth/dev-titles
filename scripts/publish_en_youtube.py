@@ -86,6 +86,17 @@ def done_today(ledger: Path = LEDGER) -> set[str]:
     }
 
 
+def artifact_errors(path: Path) -> list:
+    from dev_titles.cli import _read_any
+    from dev_titles.validate import validate_subtitle
+
+    return [
+        v
+        for v in validate_subtitle(_read_any(str(path), "en"))
+        if v.rule in ("sound_tag", "caption_artifact")
+    ]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--client-secret", required=True)
@@ -122,6 +133,10 @@ def main():
         vid = ids.get(name) or video_id(name, a.meta_dir)
         if not vid:
             print(f"  {name:<24} NO VIDEO ID — skip")
+            continue
+        bad = artifact_errors(srt)
+        if bad:  # never publish a track with sound tags / '>>' markers (scripts/check_upload.py)
+            print(f"  {name:<24} REFUSED — {len(bad)} cue(s) with {sorted({v.rule for v in bad})}")
             continue
         plan = pub.upsert_caption(vid, "en", str(srt), name="English", dry_run=True)
         spent += UNITS["list"]

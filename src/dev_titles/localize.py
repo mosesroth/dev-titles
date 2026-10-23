@@ -464,6 +464,13 @@ def effective_glossary(
         if zh.get("pronoun_conversational"):
             zh["notes"] = zh["pronoun_conversational"] + "\n" + zh.get("notes", "")
         g.style = {**glossary.style, "zh-Hans": zh}  # don't mutate the caller's style dict
+    if conversational:
+        # any language's interview-only notes (ja: spoken register over the presentation rules)
+        for code, st in list((getattr(g, "style", None) or {}).items()):
+            if isinstance(st, dict) and st.get("notes_conversational"):
+                st = dict(st)
+                st["notes"] = st["notes_conversational"] + "\n" + st.get("notes", "")
+                g.style = {**g.style, code: st}
     # DNT / keep-Latin is resolved from ONE unified source (see keep_latin_terms) so no
     # individual source is a separate crack (a term kept Latin by one source but not another).
     extra_dnt = keep_latin_terms(glossary, video_vocab, lang)

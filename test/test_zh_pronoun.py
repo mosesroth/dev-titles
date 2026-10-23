@@ -38,3 +38,15 @@ def test_pronoun_pass_applies_and_is_idempotent(tmp_path):
     assert [c["i"] for c in chg] == [1] and recs[1].txt == "你们目前只支持iOS"
     assert recs[0].txt == "您能聊聊吗？"
     assert pronoun_pass(recs, invoke, state, logger=lambda m: None) == [] and len(calls) == 1
+
+
+def test_you_all_to_guests_is_a_candidate():
+    recs = [SentenceRecord("zh-Hans", 0, "You all build in public.", "大家都在公开构建", "", [])]
+    seen = []
+
+    def invoke(prompt):
+        seen.append(prompt)
+        return json.dumps([{"id": 0, "referent": "GROUP", "zh": "你们都在公开构建"}])
+
+    chg = pronoun_pass(recs, invoke, None, logger=lambda m: None)
+    assert seen and recs[0].txt == "你们都在公开构建" and chg[0]["referent"] == "GROUP"

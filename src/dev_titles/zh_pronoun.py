@@ -27,6 +27,11 @@ from pathlib import Path
 
 _YOU = re.compile(r"\byou(?:r|rs|rself|'re|'ve|'d|'ll)?\b", re.I)
 _SINGULAR = re.compile(r"您|你(?!们)")
+# "you all" / "you guys" / "both of you": rendered 大家, which is right for the VIEWERS but wrong when
+# it's said to the people in the conversation ("You all build in public." -> 你们)
+_YOU_ALL = re.compile(
+    r"\byou (?:all|guys|both|two)\b|\b(?:all|both|each|either) of you\b|\byou folks\b", re.I
+)
 # characters a pronoun fix may add or remove; everything else must match exactly
 _PRONOUN_CHARS = set("您你们大家的就，, ")
 
@@ -50,6 +55,8 @@ put to them, "for you, Mike", "I love the work you do"). For every other "you":
   - GROUP    — "you" means the addressee's team, company or several people ("right now you're just doing
                iOS" said to an engineer about their company's library): use 你们.
   - AUDIENCE — "you" means the viewers watching the video: use 大家.
+  (A "you all / you guys" said to the people IN the conversation — the guests — is GROUP: 你们, even
+   where the Chinese currently has 大家; 大家 is only for the viewers.)
   - PERSON   — one specific person being spoken to: KEEP 您.
 When unsure, it is PERSON (keep). Change ONLY the pronoun (and a directly attached 的 or comma);
 never reword anything else.
@@ -104,7 +111,11 @@ def pronoun_pass(
     todo = [
         r
         for r in records
-        if _YOU.search(r.src) and _SINGULAR.search(r.txt) and not state.get(_h(r.src, r.txt))
+        if (
+            (_YOU.search(r.src) and _SINGULAR.search(r.txt))
+            or (_YOU_ALL.search(r.src) and "大家" in r.txt)
+        )
+        and not state.get(_h(r.src, r.txt))
     ]
     kind = "interview / conversation" if conversational else "talk or tutorial"
     applied: list[dict] = []

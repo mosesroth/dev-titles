@@ -157,6 +157,26 @@ def _render_qe_tiers(suspects: list[dict]) -> list[str]:
     return out
 
 
+def _without_artifacts(en: Subtitle, outputs: list):
+    import dataclasses
+
+    from .cue_builder import strip_sound_tags
+
+    def clean(sub: Subtitle, label: str) -> Subtitle:
+        new = strip_sound_tags(sub)
+        changed = sum(1 for a, b in zip(sub.cues, new.cues) if a.lines != b.lines)
+        changed += len(sub.cues) - len(new.cues)
+        if changed:
+            print(
+                f"{label}: removed sound tags / '>>' markers from {changed} cue(s) before writing"
+            )
+        return new if changed else sub
+
+    return clean(en, "en"), [
+        dataclasses.replace(o, subtitle=clean(o.subtitle, o.language)) for o in outputs
+    ]
+
+
 def build_review_bundle(out_dir: str | Path, en: Subtitle, outputs: list[LangOutput]) -> list[str]:
     """Write the EN master, per-language VTT+SRT, and REVIEW.md. Returns paths."""
     out = Path(out_dir)
@@ -171,6 +191,9 @@ def build_review_bundle(out_dir: str | Path, en: Subtitle, outputs: list[LangOut
     from .resegment import normalize_en_layout
 
     en = normalize_en_layout(en)  # EN deliverable always meets its layout spec
+    # LAST LINE OF DEFENCE: nothing with a sound tag / '>>' marker is ever written as a deliverable,
+    # whatever path produced it (inputs are stripped upstream; this catches what slips through).
+    en, outputs = _without_artifacts(en, outputs)
     _w("en.vtt", write_vtt(en))
     for o in outputs:
         _w(f"{o.language}.vtt", write_vtt(o.subtitle))

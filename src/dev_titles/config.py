@@ -21,6 +21,10 @@ class LangSpec:
     # (used as the condensation budget), while the validator should
     # flag only cues genuinely too fast to READ — otherwise a density
     # target set at house p90 flags ~10%+ of good cues by construction.
+    hard_cpl: int | None = None  # validation ERROR ceiling; between max_cpl and this is a warning.
+    # max_cpl stays the SEGMENTER's target. ja: native-reviewed lines run to 21.5 (the JP SG says
+    # "about 16"), so a 20-21 wide line a reviewer chose is not a defect (in one delivery 18 of 22
+    # ja overruns were the reviewer's own line breaks).
     min_dur: float = 0.833  # seconds (min 20 frames @ 24fps ~ 0.833s)
     max_dur: float = 7.0
     min_gap_frames: int = 2  # min gap between adjacent cues
@@ -53,7 +57,9 @@ SPECS: dict[str, LangSpec] = {
     # so the REVIEW flags only genuinely-too-fast cues — chiefly ultra-short backchannel cues,
     # which are ALSO caught by min_dur, not the ~10% that merely sit above the density p90.
     "zh-Hans": LangSpec("zh-Hans", max_cpl=20, max_cps=12.0, warn_cps=16.0, cjk=True),
-    "ja": LangSpec("ja", max_cpl=19, max_cps=8.5, warn_cps=13.0, min_dur=0.5, cjk=True),
+    "ja": LangSpec(
+        "ja", max_cpl=19, hard_cpl=22, max_cps=8.5, warn_cps=13.0, min_dur=0.5, cjk=True
+    ),
 }
 
 

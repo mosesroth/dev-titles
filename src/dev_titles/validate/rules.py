@@ -21,16 +21,17 @@ from ..linguistics import is_repeated_text
 from ..model import Cue, Subtitle
 from ..textwidth import display_width
 
-_CJK_SOUND_TAG = re.compile(
-    r"[\[［【(（]\s*(?:背景)?(?:音乐|音楽|BGM|掌声|拍手|欢呼|歓声|笑声|音效|効果音)[^\]］】)）]{0,6}[\]］】)）]"
-)
 _CJK_LAUGH = re.compile(r"[(（]笑[)）]")
 
 
-def _sound_tag():
-    from ..cue_builder import _SOUND_TAG  # the same pattern strip_sound_tags removes
+def _patterns():
+    from ..cue_builder import (  # what strip_artifacts removes
+        _SOUND_TAG,
+        CJK_SOUND_TAG,
+        SPEAKER_MARK,
+    )
 
-    return _SOUND_TAG
+    return _SOUND_TAG, CJK_SOUND_TAG, SPEAKER_MARK
 
 
 @dataclass
@@ -53,7 +54,15 @@ def validate_cue(cue: Cue, spec: LangSpec, conversational: bool = False) -> list
     for ln in cue.lines:
         w = display_width(ln, cjk=spec.cjk)
         if w > spec.max_cpl:
-            v.append(Violation(idx, "max_cpl", "error", f"line width {w} > {spec.max_cpl}: {ln!r}"))
+            hard = spec.hard_cpl is not None and w <= spec.hard_cpl
+            v.append(
+                Violation(
+                    idx,
+                    "max_cpl",
+                    "warn" if hard else "error",
+                    f"line width {w} > {spec.max_cpl}: {ln!r}",
+                )
+            )
 
     # Duration. Tolerance: a cue re-timed to EXACTLY min_dur can land a hair under (0.8329999s)
     # from float rounding — that's not a real violation, so allow a 1ms epsilon (a boxed
@@ -91,8 +100,11 @@ def validate_cue(cue: Cue, spec: LangSpec, conversational: bool = False) -> list
     # They slipped into a delivery when a fix was carried onto a live YouTube caption that still
     # had '[music]'. A Japanese （笑） is a reviewer's choice -> warn.
     text = " ".join(cue.lines)
-    if _sound_tag().search(text) or _CJK_SOUND_TAG.search(text):
+    tag, cjk_tag, mark = _patterns()
+    if tag.search(text) or cjk_tag.search(text):
         v.append(Violation(idx, "sound_tag", "error", f"non-speech tag in the text: {text[:60]!r}"))
+    if any(mark.match(ln) for ln in cue.lines):
+        v.append(Violation(idx, "caption_artifact", "error", f"'>>' speaker marker: {text[:60]!r}"))
     elif _CJK_LAUGH.search(text):
         v.append(Violation(idx, "sound_tag", "warn", f"laughter marker in the text: {text[:60]!r}"))
 

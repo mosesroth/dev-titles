@@ -14,6 +14,15 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
   `scripts/check_upload.py`, which validates every subtitle file in an upload folder before
   handover. A subtitle input to `run` is now stripped of sound tags before it becomes the EN master.
 
+- Sound-tag detection is vocabulary-based ([MUSIC PLAYING], (light music continues), [applause and
+  cheering], [speaking Japanese]…; UI names like [Build] untouched); YouTube `>>` speaker markers are
+  stripped and flagged; the review bundle strips both before writing any file; the EN publish script
+  refuses a track that has either.
+- ja `notes_conversational` (spoken register for interviews), closing-thanks rules (ja/zh), React /
+  Linux Foundation names; the zh pronoun pass also checks "you all / you guys" rendered 大家.
+- ja validation: lines 20-22 wide are a warning (`hard_cpl`), over 22 an error; 19 stays the
+  segmenter's target.
+
 ### Fixed
 - Translation prompts: per-line speaker / meaning notes were appended to the end of the
   whole-transcript reference block, nothing marked which line was being translated, and the
