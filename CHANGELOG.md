@@ -27,6 +27,11 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
   speech (our ASR words, else the video's YouTube auto-captions). More than 2 s late is an error.
   `run`/`localize` re-time the EN when needed (text unchanged), and the EN gate blocks translation
   while cues are still off. `scripts/retime_en_to_speech.py` handles existing tracks.
+- **zh/ja vs the speech, by content** (`validate/content_sync.py`): each translated cue is mapped
+  (one cached LLM call) to the EN sentences it carries, and those are timed by the speech. A run of
+  2+ cues more than 2 s off is an error. Runs in `check_upload.py` and after `localize`. EN more than
+  5 s early is now an error too.
+- **`zh_line_end_punct` rule** (CN style guide: no ，、； at a line end).
 - **`duplicate_text` rule:** the same 9+ word run within 3 cues is an error; 6–8 words is a warning.
 - **The EN gate blocks mechanical defects** (sound tags, `>>`, duplicates, overlaps, line count/width,
   speech sync) even when the EN is signed off.

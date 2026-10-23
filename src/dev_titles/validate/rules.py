@@ -130,6 +130,12 @@ def _validate_cjk(cue: Cue, spec: LangSpec, conversational: bool = False) -> lis
             v.append(
                 Violation(idx, "kinsoku_line_end", "error", f"line ends with forbidden {ln[-1]!r}")
             )
+        if spec.lang == "zh-Hans" and ln.rstrip()[-1:] in "，、；":
+            # CN subtitle SG: no ，、； at a line end (the line break is the pause). The pipeline
+            # strips them (wrap_lines).
+            v.append(
+                Violation(idx, "zh_line_end_punct", "error", f"line ends with {ln.rstrip()[-1]!r}")
+            )
     joined = "".join(cue.lines)
     # Stray ASCII period in CJK text (not inside a Latin token like 'Next.js' / 'v1.2', not an
     # ellipsis '...'): an editing artifact — one reviewed ja file carried 8 of them

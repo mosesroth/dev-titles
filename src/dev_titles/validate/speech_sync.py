@@ -23,6 +23,7 @@ from pathlib import Path
 LATE_S = 1.0  # WARN: the cue starts this much AFTER its first word is spoken (text arrives late)
 LATE_ERROR_S = 2.0  # ERROR beyond this. 1-2 s late is typically a sentence's tail word carried
 # into the next cue ("…finds it / interesting."); the defect that motivated this was 4.2 s.
+EARLY_ERROR_S = 5.0  # ERROR: text on screen this long before it is said (a 6 s "Hi" opening cue)
 EARLY_S = 3.0  # WARN: the cue starts this much BEFORE its words (e.g. it kept the time span of
 # filler that clean-read deleted, so the text sits on screen while "um, you know" is said)
 
@@ -122,7 +123,9 @@ def speech_sync_report(en, speech: list[tuple[str, float]]) -> dict:
                     "cue": k + 1,
                     "start": round(c.start, 2),
                     "offset": delta,
-                    "severity": "error" if delta < -LATE_ERROR_S else "warn",
+                    "severity": (
+                        "error" if delta < -LATE_ERROR_S or delta > EARLY_ERROR_S else "warn"
+                    ),
                     "text": c.text[:60],
                 }
             )

@@ -5,7 +5,9 @@
      width / count, durations, overlaps…);
   2. an EN track out of sync with the SPEECH (validate/speech_sync.py: a cue starting > 2 s after
      its words are spoken), measured against the video's word-timed YouTube auto-captions;
-  3. a translated track drifted from the EN track (validate/sync.py);
+  3. a translated track drifted from the EN track (validate/sync.py), or shown away from when its
+     content is SPOKEN (validate/content_sync.py: each cue mapped to the EN sentences it translates,
+     those timed by the speech; a run of >= 2 cues > 2 s off is an error);
   4. a track that differs from the library copy in output/FINAL_SUBTITLES (the library must be
      what ships).
 
@@ -32,6 +34,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from dev_titles.cli import _read_any  # noqa: E402
 from dev_titles.validate import validate_subtitle  # noqa: E402
+from dev_titles.validate.content_sync import content_speech_desync  # noqa: E402
 from dev_titles.validate.speech_sync import (  # noqa: E402
     speech_sync_report,
     speech_words_for,
@@ -90,6 +93,7 @@ def main(argv=None) -> int:
     for p in [f for f in files if f.suffix == ".srt" and _lang(f.name) == "en"]:
         video = p.name.split(".")[0]
         en = _read_any(str(p), "en")
+        speech: list = []
         if not a.no_speech:
             vid = ids.get(video) or video_id_for(video, OUTPUT / "ticket")
             speech = speech_words_for(vid, OUTPUT / "_speech") if vid else []
@@ -114,6 +118,24 @@ def main(argv=None) -> int:
                 warnings.append(
                     f"{q.name} {d['start']:.1f}s: '{d['anchor']}' {d['gap']:.1f}s from the EN cue"
                 )
+            if speech:
+                from dev_titles.translate import CliTranslator
+
+                vid = ids.get(video) or video_id_for(video, OUTPUT / "ticket")
+                r = content_speech_desync(
+                    _read_any(str(q), lang),
+                    en,
+                    speech,
+                    CliTranslator()._invoke,
+                    lang_name="Chinese" if lang == "zh-Hans" else "Japanese",
+                    cache_path=OUTPUT / "_speech" / f"{vid}.{lang}.contentmap.json",
+                )
+                for o in r["off"]:
+                    msg = (
+                        f"{q.name} {o['start']:.1f}s: shown {o['gap']:.1f}s "
+                        f"{'after' if o['late'] else 'before'} its content is spoken — {o['text']!r}"
+                    )
+                    (failures if o["severity"] == "error" else warnings).append(msg)
 
     for w in warnings:
         print(f"warn  {w}")

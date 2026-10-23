@@ -106,3 +106,46 @@ def test_builder_rebalances_an_orphan_instead_of_a_third_line():
     words = [Word(t, 0.3 * i, 0.3 * i + 0.25) for i, t in enumerate(text)]
     sub = build_en_cues(Transcript("en", words), drop_disfluencies=False)
     assert all(len(c.lines) <= 2 for c in sub.cues)
+
+
+def test_content_sync_flags_a_run_of_cues_shown_late(tmp_path):
+    from dev_titles.validate.content_sync import content_speech_desync
+
+    en = Subtitle(
+        "en",
+        [
+            Cue(10.0, 13.0, ["So you can run it on the device."]),
+            Cue(13.0, 17.5, ["And then we ship the app to every user today."]),
+        ],
+    )
+    late = Subtitle(
+        "zh-Hans",
+        [
+            Cue(20.0, 23.0, ["所以您可以在设备上运行它"]),
+            Cue(23.0, 26.0, ["然后我们把应用发给所有用户"]),
+        ],
+    )
+    ok = Subtitle(
+        "zh-Hans",
+        [
+            Cue(10.0, 13.0, ["所以您可以在设备上运行它"]),
+            Cue(13.0, 17.0, ["然后我们把应用发给所有用户"]),
+        ],
+    )
+    inv = lambda p: '{"0": [0, 0], "1": [1, 1]}'  # noqa: E731
+    r = content_speech_desync(late, en, _speech(), inv, lang_name="Chinese")
+    assert [o["severity"] for o in r["off"]] == ["error", "error"] and all(
+        o["late"] for o in r["off"]
+    )
+    assert content_speech_desync(ok, en, _speech(), inv, lang_name="Chinese")["off"] == []
+    one = Subtitle(
+        "zh-Hans",
+        [
+            Cue(10.0, 13.0, ["所以您可以在设备上运行它"]),
+            Cue(21.0, 24.0, ["然后我们把应用发给所有用户"]),
+        ],
+    )
+    assert [
+        o["severity"]
+        for o in content_speech_desync(one, en, _speech(), inv, lang_name="Chinese")["off"]
+    ] == ["warn"]

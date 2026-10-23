@@ -418,6 +418,45 @@ def _speech_align(en, out: Path):
     return en
 
 
+def _target_speech_check(en, out: Path, outputs) -> None:
+    """Each translation vs the SPEECH by content (validate/content_sync.py), when this video has
+    word-timed speech (out/raw.json or a cached auto-caption in out/_speech). Recorded in
+    target_sync.json and printed; scripts/check_upload.py fails on it before handover."""
+    from .translate import CliTranslator
+    from .validate.content_sync import content_speech_desync
+    from .validate.speech_sync import load_speech_words
+
+    srcs = [out / "raw.json"] + (
+        sorted((out / "_speech").glob("*.json3")) if (out / "_speech").is_dir() else []
+    )
+    speech = next((load_speech_words(x) for x in srcs if x.exists()), [])
+    if not speech:
+        return
+    rec = {}
+    for o in outputs:
+        try:
+            r = content_speech_desync(
+                o.subtitle,
+                en,
+                speech,
+                CliTranslator()._invoke,
+                lang_name={"zh-Hans": "Chinese", "ja": "Japanese"}.get(o.language, o.language),
+                cache_path=out / f"target_sync_map.{o.language}.json",
+            )
+        except Exception as e:
+            print(f"{o.language}: speech-sync check skipped ({type(e).__name__})")
+            continue
+        errs = [x for x in r["off"] if x["severity"] == "error"]
+        rec[o.language] = r
+        print(
+            f"{o.language}: speech sync — {r['checked']} cues checked, {len(errs)} out of step"
+            + (f" (first at {errs[0]['start']:.0f}s)" if errs else "")
+        )
+    (out / "target_sync.json").write_text(
+        json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+
+
 def _translate_and_bundle(
     args, en, out: Path, glossary, video_vocab, *, title: str, en_path: str, cache_path
 ) -> int:
@@ -457,6 +496,7 @@ def _translate_and_bundle(
         logger=lambda _m: print(_m, flush=True),
     )
     _persist_term_pins(outputs, out)
+    _target_speech_check(en, out, outputs)
     written = build_review_bundle(out, en, outputs)
     print(f"Wrote {len(written)} files to {out}/ (REVIEW.md + per-language VTT+SRT)")
     return 0
