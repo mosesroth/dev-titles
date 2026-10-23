@@ -438,7 +438,9 @@ def test_translate_fresh_retries_then_succeeds(monkeypatch):
         return "訳文", []
 
     monkeypatch.setattr(_loc, "translate_segment", flaky)
-    monkeypatch.setattr(_loc, "_omission_gate", lambda tr, g, s, lang, txt, iss, *a: (txt, iss))
+    monkeypatch.setattr(
+        _loc, "_omission_gate", lambda tr, g, s, lang, txt, iss, *a, **k: (txt, iss)
+    )
     txt, iss, residual = _loc._translate_fresh(
         0,
         _sent("Hi."),
@@ -456,3 +458,28 @@ def test_translate_fresh_retries_then_succeeds(monkeypatch):
         logger=lambda m: None,
     )
     assert (txt, residual, len(calls)) == ("訳文", "", 2)
+
+
+def test_line_context_sits_beside_the_line_in_both_prompts():
+    """Meaning/speaker notes + neighbors go next to the line (translate AND reflect prompts), not
+    into the whole-transcript reference block; an empty line_context leaves the prompts unchanged.
+    """
+    from dev_titles.translate.base import TranslationRequest
+    from dev_titles.translate.prompts import build_reflect_prompt, build_translate_prompt
+
+    lc = "THE LINE IN CONTEXT:\n>> Bring it home.\nMEANING NOTE for this line: make it concrete"
+    req = TranslationRequest("Bring it home.", "en", "ja", full_context="T", line_context=lc)
+    tp, rp = build_translate_prompt(req), build_reflect_prompt(req, "x")
+    assert tp.index("</CONTEXT>") < tp.index("MEANING NOTE") < tp.index("<TRANSLATE_THIS>")
+    assert "MEANING NOTE" in rp and rp.index("</SOURCE>") < rp.index("MEANING NOTE")
+    bare = TranslationRequest("Bring it home.", "en", "ja", full_context="T")
+    assert "</CONTEXT>\n\nTranslate ONLY" in build_translate_prompt(bare)
+
+
+def test_line_context_window_marks_the_line():
+    from dev_titles.localize import _line_context
+
+    sents = [_sent(t) for t in ["A one.", "B two.", "C three.", "D four.", "E five.", "F six."]]
+    out = _line_context(2, sents, ["Host", "Guest", "Host", "Guest", "Host", "Guest"], None)
+    assert ">> Host: C three." in out and "   Guest: B two." in out and "E five." in out
+    assert "F six." not in out and "SPEAKER OF THE LINE TO TRANSLATE: Host" in out

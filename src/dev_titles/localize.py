@@ -272,6 +272,32 @@ def _ctx_for(sents, video_vocab) -> str:
     return _with_brief(labeled_transcript(sents, _speakers_for(sents, video_vocab)), video_vocab)
 
 
+def _line_context(i: int, sents, spk: list[str], video_vocab, k: int = 2) -> str:
+    """The line in its local context — the k lines before and after (speaker-labeled, the line
+    marked >>) — plus its speaker and meaning notes, for the prompt block beside the line
+    (TranslationRequest.line_context). On A/B lines against a human final the old placement (notes
+    appended to the whole-transcript context, no position marker, nothing in the reflect prompt)
+    got wrong — "Bring it home", "Okay, okay", "wrap up with a couple things" before questions —
+    came out right with this block."""
+    from .en_gloss import meaning_note
+    from .speakers import speaker_note
+
+    def lab(j):
+        return (f"{spk[j]}: " if spk else "") + sents[j].text
+
+    rows = [
+        (">> " if j == i else "   ") + lab(j)
+        for j in range(max(0, i - k), min(len(sents), i + k + 1))
+    ]
+    return (
+        "THE LINE IN CONTEXT (>> marks the line you are translating; the others are for "
+        "understanding only — do not translate them):\n"
+        + "\n".join(rows)
+        + speaker_note(i, spk)
+        + meaning_note(i, (video_vocab or {}).get("meaning_notes"))
+    )
+
+
 def keep_latin_terms(glossary, video_vocab, lang: str = "") -> list[str]:
     """SINGLE source of truth for 'keep this Latin' (DNT) terms, unified across EVERY source
     so none is a separate crack (a term slipping through one source while masked by another). Collects:
@@ -532,6 +558,7 @@ def _translate_fresh(
     spec,
     *,
     ctx,
+    line_context="",
     exemplar_bank,
     extra_dnt,
     invoke,
@@ -562,13 +589,26 @@ def _translate_fresh(
                 s.text,
                 lang,
                 full_context=ctx,
+                line_context=line_context,
                 reflect=True,
                 char_budget=budget,
                 exemplar_bank=exemplar_bank,
                 extra_dnt=extra_dnt,
             )
             txt, iss = _omission_gate(
-                translator, g, s, lang, txt, iss, ctx, budget, exemplar_bank, extra_dnt, logger, i
+                translator,
+                g,
+                s,
+                lang,
+                txt,
+                iss,
+                ctx,
+                budget,
+                exemplar_bank,
+                extra_dnt,
+                logger,
+                i,
+                line_context=line_context,
             )
             residual = ""
             if backcheck:
@@ -638,9 +678,7 @@ def translate_subtitle(
     Completeness gates (omission retry + coverage edit-fix) run when `invoke` (or
     `translator._invoke`) is available and `backcheck` is on. A `cache_path` JSONL
     makes the run resumable (per-(lang, sentence) records)."""
-    from .en_gloss import meaning_note
     from .qa import protected_spans
-    from .speakers import speaker_note
 
     spec = spec_for(lang)
     normalize = _normalizer(lang, conversational)
@@ -688,9 +726,8 @@ def translate_subtitle(
                     lang,
                     _LANG_NAME.get(lang, lang),
                     spec,
-                    ctx=ctx
-                    + speaker_note(i, spk)
-                    + meaning_note(i, (video_vocab or {}).get("meaning_notes")),
+                    ctx=ctx,
+                    line_context=_line_context(i, sents, spk, video_vocab),
                     exemplar_bank=exemplar_bank,
                     extra_dnt=extra_dnt,
                     invoke=invoke,
@@ -729,7 +766,19 @@ def translate_subtitle(
 
 
 def _omission_gate(
-    translator, g, s, lang, txt, iss, ctx, budget, exemplar_bank, extra_dnt, logger, i
+    translator,
+    g,
+    s,
+    lang,
+    txt,
+    iss,
+    ctx,
+    budget,
+    exemplar_bank,
+    extra_dnt,
+    logger,
+    i,
+    line_context="",
 ):
     """One completeness retry when the draft is far shorter than its EN word count
     OR a hard term is missing OR a number/identifier was dropped. Keeps the attempt
@@ -776,6 +825,7 @@ def _omission_gate(
         s.text,
         lang,
         full_context=ctx,
+        line_context=line_context,
         reflect=True,
         char_budget=budget,
         exemplar_bank=exemplar_bank,
@@ -875,36 +925,34 @@ def make_retranslate(
         # referent 'on some of them'). Give the model the IMMEDIATE neighbors so it can resolve
         # who's speaking / what a pronoun points to — this is exactly the context the whole-doc
         # blob dilutes. It's for disambiguation only; only the target line is translated.
-        prev = sents[rec.i - 1].text if rec.i > 0 else ""
-        nxt = sents[rec.i + 1].text if rec.i + 1 < len(sents) else ""
-        local = ""
-        if prev or nxt:
-            local = (
-                "\nLOCAL CONTEXT (for disambiguation only — do NOT translate these, only the "
-                f"line above): [previous] {prev!r}  [next] {nxt!r}"
-            )
-        from .en_gloss import meaning_note
-        from .speakers import speaker_note
-
-        _ctx_i = (
-            ctx
-            + speaker_note(rec.i, _speakers_for(sents, video_vocab))
-            + meaning_note(rec.i, (video_vocab or {}).get("meaning_notes"))
-        )
+        _line = _line_context(rec.i, sents, _speakers_for(sents, video_vocab), video_vocab)
         txt, iss = translate_segment(
             translator,
             g,
             s.text,
             lang,
-            full_context=_ctx_i,
+            full_context=ctx,
+            line_context=_line,
             reflect=True,
             char_budget=budget,
             exemplar_bank=exemplar_bank,
-            correction_hint=critique + local,
+            correction_hint=critique,
             extra_dnt=extra_dnt,
         )
         txt, iss = _omission_gate(
-            translator, g, s, lang, txt, iss, ctx, budget, exemplar_bank, extra_dnt, _noop, rec.i
+            translator,
+            g,
+            s,
+            lang,
+            txt,
+            iss,
+            ctx,
+            budget,
+            exemplar_bank,
+            extra_dnt,
+            _noop,
+            rec.i,
+            line_context=_line,
         )
         if backcheck and inv is not None:
             txt, iss, _ = _coverage_editfix(inv, g, s, lang, lang_name, txt, iss, 4, _noop, rec.i)

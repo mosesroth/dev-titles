@@ -117,7 +117,7 @@ PUNCTUATION: {req.punct_note or "match the exemplars' punctuation density."}
 Full transcript context (for reference — do NOT translate this whole thing):
 <CONTEXT>
 {req.full_context}
-</CONTEXT>
+</CONTEXT>{_line_block(req)}
 
 Translate ONLY the text between <TRANSLATE_THIS> tags into {tgt}. Translate the
 FULL meaning faithfully and completely (omit nothing), reading naturally as
@@ -127,6 +127,15 @@ not add notes, quotes, or explanations — return only the translation.
 <TRANSLATE_THIS>
 {req.source_text}
 </TRANSLATE_THIS>{_completeness_block(req)}{_correction_block(req)}"""
+
+
+def _line_block(req: TranslationRequest) -> str:
+    """The line in its local context + its notes, placed beside the line itself. They used to be
+    appended to the end of the whole-transcript <CONTEXT> ("for reference — do NOT translate"),
+    with nothing marking which line was being translated, and the reflect prompt had neither —
+    so a correct meaning note ("Bring it home" = make it concrete) still came out as "let's wrap
+    up" (an A/B against a human-reviewed final)."""
+    return f"\n{req.line_context.strip()}" if getattr(req, "line_context", "") else ""
 
 
 def _completeness_block(req: TranslationRequest) -> str:
@@ -158,7 +167,7 @@ def build_reflect_prompt(req: TranslationRequest, draft: str) -> str:
 Source:
 <SOURCE>
 {req.source_text}
-</SOURCE>
+</SOURCE>{_line_block(req)}
 
 Draft:
 <DRAFT>

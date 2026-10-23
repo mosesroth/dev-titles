@@ -773,7 +773,9 @@ def _run_vocab(args, out: Path) -> dict:
 
 
 def _en_from_caption(args, ri, glossary, video_vocab, out: Path):
-    en = _read_any(ri.path, "en")
+    from .cue_builder import strip_sound_tags
+
+    en = strip_sound_tags(_read_any(ri.path, "en"))  # [music] etc. never reach the EN master
     if not args.no_correct:
         # A human/imported caption gets the SAME proofread as ASR audio: merge rolling-caption
         # duplicates, then clean-read correct (fix mis-transcribed tech terms/homophones like

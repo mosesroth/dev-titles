@@ -20,6 +20,9 @@ class TranslationRequest:
     source_lang: str
     target_lang: str
     full_context: str = ""  # whole-transcript context window
+    # the line's own surroundings + notes, shown NEXT TO the line (translate AND reflect prompts):
+    # neighbors (prev/next, speaker-labeled, the line marked), speaker and meaning notes
+    line_context: str = ""
     glossary_terms: list[Term] = field(default_factory=list)
     register: str = ""  # e.g. "teineigo", "formal-written"
     style_notes: str = ""

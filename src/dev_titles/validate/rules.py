@@ -21,6 +21,17 @@ from ..linguistics import is_repeated_text
 from ..model import Cue, Subtitle
 from ..textwidth import display_width
 
+_CJK_SOUND_TAG = re.compile(
+    r"[\[［【(（]\s*(?:背景)?(?:音乐|音楽|BGM|掌声|拍手|欢呼|歓声|笑声|音效|効果音)[^\]］】)）]{0,6}[\]］】)）]"
+)
+_CJK_LAUGH = re.compile(r"[(（]笑[)）]")
+
+
+def _sound_tag():
+    from ..cue_builder import _SOUND_TAG  # the same pattern strip_sound_tags removes
+
+    return _SOUND_TAG
+
 
 @dataclass
 class Violation:
@@ -74,6 +85,16 @@ def validate_cue(cue: Cue, spec: LangSpec, conversational: bool = False) -> list
         v.append(
             Violation(idx, "repetition", "warn", f"looks like repeated content (unit={unit!r})")
         )
+
+    # Non-speech SOUND TAGS ([music], (applause), ♪, [音乐] / ［音楽］): raw caption/ASR artifacts are
+    # never shipped (DCMP: background sound is captioned only when essential, and then deliberately).
+    # They slipped into a delivery when a fix was carried onto a live YouTube caption that still
+    # had '[music]'. A Japanese （笑） is a reviewer's choice -> warn.
+    text = " ".join(cue.lines)
+    if _sound_tag().search(text) or _CJK_SOUND_TAG.search(text):
+        v.append(Violation(idx, "sound_tag", "error", f"non-speech tag in the text: {text[:60]!r}"))
+    elif _CJK_LAUGH.search(text):
+        v.append(Violation(idx, "sound_tag", "warn", f"laughter marker in the text: {text[:60]!r}"))
 
     # CJK-specific.
     if spec.cjk:

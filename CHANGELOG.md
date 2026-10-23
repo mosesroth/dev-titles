@@ -10,6 +10,16 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
   or a generic possessive "your" (将您的应用 -> 将应用), no longer comes out as the 您 reserved for
   the one person addressed. Guarded (only pronoun characters may change) and idempotent.
 
+- `sound_tag` validation error ([music], (applause), ♪, [音乐] / ［音楽］; a ja （笑） is a warning) and
+  `scripts/check_upload.py`, which validates every subtitle file in an upload folder before
+  handover. A subtitle input to `run` is now stripped of sound tags before it becomes the EN master.
+
+### Fixed
+- Translation prompts: per-line speaker / meaning notes were appended to the end of the
+  whole-transcript reference block, nothing marked which line was being translated, and the
+  reflect pass saw neither. They now sit beside the line in both prompts, with the two lines
+  before and after it (`TranslationRequest.line_context`), so a correct note is actually followed.
+
 ### Changed
 - `translate_subtitle` split into cache / reuse / fresh-translation / cue-building helpers (no
   behavior change; unit tests for cache reuse and the retry path).

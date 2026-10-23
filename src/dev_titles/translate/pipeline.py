@@ -62,6 +62,7 @@ def translate_segment(
     target_lang: str,
     *,
     full_context: str = "",
+    line_context: str = "",
     reflect: bool = True,
     char_budget: int | None = None,
     exemplar_bank=None,
@@ -94,14 +95,17 @@ def translate_segment(
     # translates its English component despite the placeholder in source_text.
     masked_hint = completeness_hint
     masked_correction = correction_hint
+    masked_line = line_context  # the line's neighbors repeat its English: mask there too
     for token, span in mask.items():
         masked_hint = _replace_span(masked_hint, span, token)
         masked_correction = _replace_span(masked_correction, span, token)
+        masked_line = _replace_span(masked_line, span, token)
     req = TranslationRequest(
         source_text=masked_source,
         source_lang="en",
         target_lang=target_lang,
         full_context=full_context,
+        line_context=masked_line,
         glossary_terms=glossary.retrieve(source),  # retrieve on the REAL source
         register=style.get("register", ""),
         style_notes=style.get("notes", "")
