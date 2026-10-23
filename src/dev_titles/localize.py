@@ -19,9 +19,9 @@ import copy
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .config import spec_for
 from .glossary import EnforcementIssue, Glossary
@@ -1035,6 +1035,68 @@ def localize_en(*args, logger=_noop, **kwargs):
         return _localize_en_impl(*args, logger=logger, **kwargs)
 
 
+@dataclass
+class _Run:
+    """What every stage of one localize run shares (the old 17-parameter function's arguments)."""
+
+    en: Subtitle
+    translator: Any
+    glossary: Glossary
+    langs: tuple
+    video_vocab: dict | None
+    invoke: Callable[[str], str] | None
+    qe_invoke: Callable[[str], str] | None
+    backcheck: bool
+    exemplar_bank_for: Callable[[str], Any] | None
+    tm: Any
+    qe_judge: bool
+    qe_second_judge: Callable[[str], str] | None
+    qe_repair: bool
+    conversational: bool
+    cache_path: str | Path | None
+    condense: bool
+    native_editor: bool
+    logger: Callable[[str], None]
+
+    def path(self, name: str) -> Path | None:
+        """A file next to the cache (the video's output dir), or None without a cache."""
+        return (Path(self.cache_path).parent / name) if self.cache_path else None
+
+
+@dataclass
+class _LangRun:
+    """One target language's state as it moves through the stages."""
+
+    lang: str
+    bank: Any = None
+    rcp: Path | None = None
+    sub: Subtitle | None = None
+    issues: list = field(default_factory=list)
+    records: list = field(default_factory=list)
+    suspects: list = field(default_factory=list)
+    dqf: dict | None = None
+    prior: Any = None
+    qe_state_path: Path | None = None
+    has_major: bool = False
+    judges: Any = None
+    term_pins: dict = field(default_factory=dict)
+    pins: list = field(default_factory=list)
+
+    @property
+    def name(self) -> str:
+        return _LANG_NAME.get(self.lang, self.lang)
+
+
+def _has_major(suspects) -> bool:
+    return any(
+        "major" in str(s.get("kind", "")) or "critical" in str(s.get("kind", "")) for s in suspects
+    )
+
+
+def _dqf_note(dqf, prefix: str = ", ") -> str:
+    return (f"{prefix}DQF {dqf['score']} {'PASS' if dqf['pass'] else 'FAIL'}") if dqf else ""
+
+
 def _localize_en_impl(
     en: Subtitle,
     translator,
@@ -1060,704 +1122,695 @@ def _localize_en_impl(
     supplies few-shot style anchors per language. A `tm` (TranslationMemory) adds
     exact-match verbatim reuse + series-specific fuzzy exemplars (falls back to it for
     the exemplar bank when `exemplar_bank_for` isn't given). Reference-free translation
-    QE runs per language (deterministic always; a calibrated-DQF LLM MQM judge when `qe_judge`)."""
-    from .condense import load_originals, mark_processed
-    from .translation_qe import build_judges, incremental_review, load_qe_state
-    from .translation_qe import qe_repair as _qe_repair
-    from .translation_qe import rescore_after_repair, save_qe_state, translation_suspects
+    QE runs per language (deterministic always; a calibrated-DQF LLM MQM judge when `qe_judge`).
 
-    qe_invoke = invoke or getattr(translator, "_invoke", None)
+    Stages: video-level preparation once (brief, speakers, meaning notes, names policy), then per
+    language: translate -> condense (ja) -> native editor + reply check -> QE review ->
+    condensation revert -> QE repair -> term pins -> save QE state -> DNT auto-correct -> finalize.
+    """
+    run = _Run(
+        en=en,
+        translator=translator,
+        glossary=glossary,
+        langs=tuple(langs),
+        video_vocab=video_vocab,
+        invoke=invoke,
+        qe_invoke=invoke or getattr(translator, "_invoke", None),
+        backcheck=backcheck,
+        exemplar_bank_for=exemplar_bank_for,
+        tm=tm,
+        qe_judge=qe_judge,
+        qe_second_judge=qe_second_judge,
+        qe_repair=qe_repair,
+        conversational=conversational,
+        cache_path=cache_path,
+        condense=condense,
+        native_editor=native_editor,
+        logger=logger,
+    )
+    if run.qe_invoke is not None and native_editor:
+        _prepare_video(run)
     outputs: list[LangOutput] = []
-    if qe_invoke is not None and native_editor:
-        from .editor import video_brief, video_description
+    for lang in run.langs:
+        L = _translate_lang(run, lang)
+        _condense_pass(run, L)
+        _editor_pass(run, L)
+        _review_pass(run, L)
+        _condensation_revert(run, L)
+        _qe_repair_pass(run, L)
+        _term_pin_pass(run, L)
+        if L.dqf is not None and L.qe_state_path is not None:
+            from .translation_qe import save_qe_state
 
-        _od = Path(cache_path).parent if cache_path else None
-        _bp = (_od / "video_brief.txt") if _od else None
-        _desc = video_description(_od)
-        _brief = video_brief(" ".join(c.text for c in en.cues), qe_invoke, _bp, description=_desc)
-        if _brief:
-            video_vocab = {**(video_vocab or {}), "brief": _brief}
-            logger(f"video brief: {_brief[:160]}…")
-        # who says each sentence (interviews): ASR diarization if saved, else one LLM pass
-        from .speakers import label_speakers
-
-        try:
-            _spk_all = label_speakers(
-                merge_en_to_sentences(en),
-                qe_invoke,
-                (_od / "speakers.json") if _od else None,
-                brief=_brief or "",
-                raw_path=(_od / "raw.json") if _od else None,
-                logger=logger,
-            )
-        except Exception as e:  # never sink a run on speaker labeling
-            logger(f"speaker labeling skipped ({type(e).__name__})")
-            _spk_all = []
-        if _spk_all:
-            video_vocab = {**(video_vocab or {}), "speakers": _spk_all}
-        # meaning notes: idioms / ambiguous phrases resolved ONCE in the English, shared by every language
-        from .en_gloss import meaning_notes
-
-        try:
-            _mn = meaning_notes(
-                merge_en_to_sentences(en),
-                qe_invoke,
-                (_od / "meaning_notes.json") if _od else None,
-                brief=_brief or "",
-            )
-        except Exception as e:  # never sink a run on it
-            logger(f"meaning notes skipped ({type(e).__name__})")
-            _mn = {}
-        if _mn:
-            video_vocab = {**(video_vocab or {}), "meaning_notes": _mn}
-            logger(
-                f"meaning notes: {sum(len(v) for v in _mn.values())} phrase(s) resolved for the translators"
-            )
-        # names policy: partner companies stay Latin; ordinary-word products get ONE rendering
-        from .entities import apply_policy, names_policy
-
-        try:
-            _pol = names_policy(
-                " ".join(c.text for c in en.cues),
-                qe_invoke,
-                (_od / "entities.json") if _od else None,
-                brief=_brief or "",
-            )
-        except Exception as e:  # never sink a run on it
-            logger(f"names policy skipped ({type(e).__name__})")
-            _pol = {}
-        if _pol.get("ordinary_products"):
-            # prefer the partner's OWN official translation (looked up once, locked in partners.yaml)
-            try:
-                from .entities import resolve_official
-                from .search import web_search
-                from .vocab_prep import http_fetch
-
-                _pol = resolve_official(
-                    _pol,
-                    web_search=web_search,
-                    web_fetch=http_fetch,
-                    invoke=qe_invoke,
-                    langs=langs,
-                    logger=logger,
-                )
-            except Exception as e:
-                logger(f"official-name lookup skipped ({type(e).__name__})")
-        if _pol.get("companies") or _pol.get("ordinary_products"):
-            video_vocab = apply_policy(video_vocab, _pol, langs)
-            logger(
-                f"names policy: keep Latin {_pol.get('companies')}; translate "
-                f"{[(x.get('name'), x.get('ja'), x.get('zh-Hans')) for x in _pol.get('ordinary_products', [])]}"
-            )
-    for lang in langs:
-        bank = (
-            exemplar_bank_for(lang)
-            if exemplar_bank_for
-            else (tm.bank(lang) if tm is not None else None)
-        )
-        rcp = (Path(cache_path).parent / f"reflow_cache.{lang}.json") if cache_path else None
-        _write_status(cache_path, phase="translate", lang=lang)
-        sub, issues, records = translate_subtitle(
-            en,
-            translator,
-            glossary,
-            lang,
-            exemplar_bank=bank,
-            video_vocab=video_vocab,
-            tm=tm,
-            invoke=invoke,
-            backcheck=backcheck,
-            cache_path=cache_path,
-            conversational=conversational,
-            logger=logger,
-        )
-        # CONDENSATION (ON by default, ja; disable with --no-condense): tighten finished translations like a subtitle editor before
-        # QE, so the panel judges what ships. See dev_titles/condense.py and its A/B notes.
-        if condense and lang == "ja" and qe_invoke is not None and records:
-            from .condense import condense_lang
-
-            _sp = (Path(cache_path).parent / f"condense_state.{lang}.json") if cache_path else None
-            # per-sentence character budget = reading-speed limit x the sentence's speech window
-            _spec = spec_for(lang)
-            _sents = merge_en_to_sentences(en)
-            _budgets = {
-                i: max(int(_spec.max_cps * max(s.end - s.start, _spec.min_dur)), 6)
-                for i, s in enumerate(_sents)
-            }
-            # ...but only lines CLEARLY too fast are touched: native-reviewed ja ships 20% of cues
-            # above 8.5 cps (p90 ~10.2), and squeezing near-limit lines to the exact budget is what
-            # produced broken grammar / dropped greetings on a tutorial test.
-            _trig_cps = float(os.environ.get("SUBTITLE_CONDENSE_TRIGGER_CPS", "10.0"))
-            # LONG LISTS ("JavaScript, TypeScript, ReScript, Java, Kotlin…") are hard to read even
-            # just over the limit — native graders flagged them — so a list sentence (>=3 commas)
-            # triggers at the target budget itself, not the looser 10 cps.
-            _triggers = {
-                i: (
-                    _budgets[i]
-                    if s.text.count(",") >= 3
-                    else max(int(_trig_cps * max(s.end - s.start, _spec.min_dur)), 6)
-                )
-                for i, s in enumerate(_sents)
-            }
-            _chg = condense_lang(
-                records,
-                qe_invoke,
-                lang,
-                _LANG_NAME.get(lang, lang),
-                _sp,
-                coverage_missing=coverage_missing,
-                normalize=_normalizer(lang, conversational),
-                logger=logger,
-                budgets=_budgets,
-                triggers=_triggers,
-                min_width=_spec.max_cpl,
-            )
-            if _chg:
-                _rewrite_cache(cache_path, lang, records)
-                logger(f"{lang}: condensed {len(_chg)} line(s)")
-        # NATIVE-EDITOR pass (ON by default; --no-editor): a native subtitle editor flags only lines a
-        # native viewer would notice (literal idioms, odd terms, run-on lists, stiff register,
-        # context misreads) and proposes minimal rewrites; accepted only past the token/number
-        # guards AND a pairwise same-meaning-and-better check by the second-family judge. Runs
-        # before QE so the panel scores what ships. See dev_titles/editor.py.
-        if native_editor and qe_invoke is not None and records:
-            from .editor import native_edit
-
-            _esp = (Path(cache_path).parent / f"editor_state.{lang}.json") if cache_path else None
-            _st = (getattr(glossary, "style", {}) or {}).get(lang, {}) or {}
-            _reg = _st.get("register_conversational" if conversational else "register", "")
-            _terms = [
-                t.translations.get(lang, "")
-                for t in effective_glossary(glossary, video_vocab, conversational, lang=lang)[
-                    0
-                ].terms
-                if t.enforce == "hard"
-                and t.source.lower() in " ".join(r.src for r in records).lower()
-            ]
-            _ech = native_edit(
-                records,
-                qe_invoke,
-                lang,
-                _LANG_NAME.get(lang, lang),
-                _esp,
-                normalize=_normalizer(lang, conversational),
-                pair_judge=qe_second_judge,
-                brief=(video_vocab or {}).get("brief", ""),
-                register=str(_reg)[:300],
-                glossary_terms=_terms,
-                speakers=(video_vocab or {}).get("speakers") or None,
-                meaning_notes=(video_vocab or {}).get("meaning_notes") or None,
-                logger=logger,
-            )
-            if _ech:
-                _rewrite_cache(cache_path, lang, records)
-                logger(f"{lang}: native editor rewrote {len(_ech)} line(s)")
-            if (video_vocab or {}).get("speakers"):
-                from .editor import reply_edit
-
-                _rch = reply_edit(
-                    records,
-                    qe_invoke,
-                    lang,
-                    _LANG_NAME.get(lang, lang),
-                    (video_vocab or {})["speakers"],
-                    normalize=_normalizer(lang, conversational),
-                    pair_judge=qe_second_judge,
-                    brief=(video_vocab or {}).get("brief", ""),
-                    state_path=(
-                        Path(cache_path).parent / f"reply_state.{lang}.json" if cache_path else None
-                    ),
-                    logger=logger,
-                )
-                if _rch:
-                    _rewrite_cache(cache_path, lang, records)
-                    logger(f"{lang}: reply check rewrote {len(_rch)} line(s)")
-        # AUTOMATIC INCREMENTAL RE-REVIEW: if a prior QE state exists for this out dir (a
-        # previous --qe-judge run), re-judge ONLY the segments whose translation changed since
-        # then and reuse the stored panel for the rest — a cheap, correct refresh of the full
-        # REVIEW (DQF + MQM tiers) after any cache mutation (QE-repair recovery, term-pins,
-        # a manual fix). First review (no state) runs the full panel. On a re-review, the panel
-        # is refreshed incrementally; the repair/term-pin passes below then run too whenever a
-        # major/critical is flagged (regardless of the DQF pass bar), and no-op when the panel
-        # is clean.
-        # Load a prior QE state REGARDLESS of the --qe-judge flag: once a video has been
-        # reviewed, ANY later run (even enforce-only, e.g. after a term-pin/manual cache edit)
-        # AUTO-refreshes the full REVIEW incrementally — re-judging only changed segments — so
-        # the DQF + MQM tiers are never silently dropped and always reflect the current cache.
-        _qe_state_path = (Path(cache_path).parent / f"qe_state.{lang}.json") if cache_path else None
-        _prior = load_qe_state(_qe_state_path) if _qe_state_path else None
-        if _prior is not None and qe_invoke is not None:
-            _judges = build_judges(qe_invoke, qe_second_judge)
-            (suspects, dqf), _chg = incremental_review(
-                records,
-                glossary,
-                lang,
-                judges=_judges,
-                lang_name=_LANG_NAME.get(lang, lang),
-                prior_state=_prior,
-                coverage_ran=backcheck,
-            )
-            logger(
-                f"{lang}: incremental re-review — re-judged {len(_chg)} changed segment(s)"
-                + (f", DQF {dqf['score']} {'PASS' if dqf['pass'] else 'FAIL'}" if dqf else "")
-            )
-        else:
-            suspects, dqf = translation_suspects(
-                records,
-                glossary,
-                lang,
-                invoke=qe_invoke,
-                judge=qe_judge,
-                second_judge=qe_second_judge,
-                coverage_ran=backcheck,
-            )
-            logger(
-                f"{lang}: translation QE — {len(suspects)} suspect(s)"
-                + (f", DQF {dqf['score']} {'PASS' if dqf['pass'] else 'FAIL'}" if dqf else "")
-            )
-
-        # Any judge-flagged major/critical to fix? Gate the repair passes on the PRESENCE of a
-        # fixable defect, NOT on the (arbitrary) DQF pass threshold — a video can clear the bar
-        # yet still carry a fixable major (wrong term, dropped clause), and there's no reason to
-        # leave it. accept-only-if-better + targeted accepts can't regress, so running it on a
-        # passing video is safe; a clean panel (no majors) is a fast no-op.
-        _has_major = any(
-            "major" in str(s.get("kind", "")) or "critical" in str(s.get("kind", ""))
-            for s in suspects
-        )
-        # CONDENSATION REVERT: condensation is checked for lost meaning, not for broken grammar or
-        # tone. Any condensed line a judge flagged (major OR minor, either judge) gets its
-        # pre-condensation text offered back — accept-only-if-better on the same panel, so a
-        # revert lands only when the original genuinely scores better.
-        _cond_sp = (Path(cache_path).parent / f"condense_state.{lang}.json") if cache_path else None
-        _orig = load_originals(_cond_sp, records) if (qe_repair and dqf is not None) else {}
-        _flagged = {
-            s["i"] for s in suspects if s.get("i") is not None and s["kind"].startswith("mqm-")
-        }
-        _revert = sorted(i for i in _orig if i in _flagged)
-        if _revert:
-            judges = build_judges(qe_invoke, qe_second_judge)
-            _mqm = [s for s in suspects if s["kind"].startswith("mqm-")]
-            _reverted = _qe_repair(
-                records,
-                lang,
-                judges=judges,
-                lang_name=_LANG_NAME.get(lang, lang),
-                retranslate=lambda rec, _crit: _orig.get(rec.i, ""),
-                per_seg={i: v for i, v in (dqf.get("per_seg") or {}).items() if i in _revert},
-                judge_suspects=[s for s in _mqm if s["i"] in _revert],
-                compare_judges=judges,
-                extra_flags=_revert,
-                cmp_samples=3,
-                logger=logger,
-            )
-            if _reverted:
-                mark_processed(_cond_sp, [r for r in records if r.i in _reverted])
-                _rewrite_cache(cache_path, lang, records)
-                sub = _subtitle_from_records(
-                    en, records, glossary, lang, video_vocab, conversational, reflow_cache_path=rcp
-                )
-                suspects, dqf = rescore_after_repair(
-                    records,
-                    glossary,
-                    lang,
-                    judges=judges,
-                    lang_name=_LANG_NAME.get(lang, lang),
-                    prior_per_seg=dqf.get("per_seg"),
-                    prior_mqm_suspects=_mqm,
-                    changed=_reverted,
-                    coverage_ran=backcheck,
-                )
-                _has_major = any(
-                    "major" in str(s.get("kind", "")) or "critical" in str(s.get("kind", ""))
-                    for s in suspects
-                )
-            logger(
-                f"{lang}: condensation revert — {len(_reverted)}/{len(_revert)} flagged condensed "
-                f"line(s) restored"
-                + (f" -> DQF {dqf['score']} {'PASS' if dqf['pass'] else 'FAIL'}" if dqf else "")
-            )
-        # Native-editor rewrites are PROTECTED from the error-judge repair loop, and every repair must
-        # also win a native-viewer pairwise check (accuracy first, then naturalness).
-        from .editor import editor_rewritten, repair_check
-
-        _editor_protected = (
-            editor_rewritten(Path(cache_path).parent / f"editor_state.{lang}.json", records)
-            if (cache_path and native_editor)
-            else set()
-        )
-        _accept_check = (
-            repair_check(qe_invoke, _LANG_NAME.get(lang, lang), records)
-            if (native_editor and qe_invoke is not None)
-            else None
-        )
-        # QE-guided auto-repair (Layer B): re-translate judge-flagged majors + deterministic
-        # garbles with the critique as a constraint; accept only if the re-judge improves.
-        if qe_repair and dqf is not None and (_prior is None or _has_major):
-            judges = build_judges(qe_invoke, qe_second_judge)
-            mqm = [s for s in suspects if s["kind"].startswith("mqm-")]
-            extra = sorted(
-                {
-                    s["i"]
-                    for s in suspects
-                    if s["i"] is not None and s["kind"] in ("dropped-token", "latin-typo?")
-                }
-            )
-            # term-inconsistency -> repair the offending cues toward the canonical rendering
-            # (closes the gap where inconsistencies were detected but wired to no fixer).
-            extra_crit: dict[int, str] = {}
-            for s in suspects:
-                if s["kind"] == "term-inconsistency":
-                    note = (
-                        f"render '{s['source']}' as '{s['target']}' — its canonical rendering "
-                        f"used elsewhere in this video (consistency)"
-                    )
-                    for ci in s.get("fix_idx", []):
-                        extra_crit[ci] = (
-                            (extra_crit[ci] + "; " + note) if ci in extra_crit else note
-                        )
-            retrans = make_retranslate(
-                en,
-                translator,
-                glossary,
-                lang,
-                exemplar_bank=bank,
-                video_vocab=video_vocab,
-                invoke=invoke,
-                backcheck=backcheck,
-                conversational=conversational,
-            )
-            # Accept/reject uses the FULL panel (both judges, corroboration aggregation), NOT
-            # Claude-only: a codex-CAUGHT major (Claude didn't flag — e.g. "Because Nimbus does"
-            # = supports MCPs) is invisible to a Claude-only compare, so a genuine fix could
-            # never register as an improvement. Full panel lets a fix that satisfies the
-            # flagging judge (without a new disagreement) land, while a fabrication that breaks
-            # the text (penalty rises) still fails the strict-drop test. Only major-flagged
-            # segments are retried (~4-5/lang), so the extra second-judge cost is bounded.
-            fixed = _qe_repair(
-                records,
-                lang,
-                judges=judges,
-                lang_name=_LANG_NAME.get(lang, lang),
-                retranslate=retrans,
-                per_seg=dqf.get("per_seg"),
-                judge_suspects=mqm,
-                compare_judges=judges,
-                include_minor=True,
-                extra_flags=extra,
-                extra_critiques=extra_crit,
-                cmp_samples=3,
-                logger=logger,
-                protected=_editor_protected,
-                accept_check=_accept_check,
-            )
-            if fixed:
-                _rewrite_cache(cache_path, lang, records)
-                sub = _subtitle_from_records(
-                    en, records, glossary, lang, video_vocab, conversational, reflow_cache_path=rcp
-                )
-                # Re-score ONLY the changed segments against the prior panel (low-noise +
-                # avoids a second full Codex panel) rather than re-drawing the whole panel.
-                suspects, dqf = rescore_after_repair(
-                    records,
-                    glossary,
-                    lang,
-                    judges=judges,
-                    lang_name=_LANG_NAME.get(lang, lang),
-                    prior_per_seg=dqf.get("per_seg"),
-                    prior_mqm_suspects=mqm,
-                    changed=fixed,
-                    coverage_ran=backcheck,
-                )
-                logger(
-                    f"{lang}: QE-repair fixed {len(fixed)} segment(s) -> "
-                    + (
-                        f"DQF {dqf['score']} {'PASS' if dqf['pass'] else 'FAIL'}"
-                        if dqf
-                        else "(no re-score)"
-                    )
-                )
-
-        # TERM-PIN auto-repair (Layer C): mechanical term-substitution fixes the retranslate
-        # loop misses — a wrong term rendering often scores ~equal, so accept-if-better rejects
-        # it and it falls through to 'human judgment'. Classify each remaining mqm critique as a
-        # term fix vs a judgment call; for term fixes, pin source->correct (avoid wrong) and
-        # enforce DETERMINISTICALLY across ALL cues (every occurrence + inconsistency, no
-        # re-translation). Judgment calls (synonym choice, idiom, rephrase) stay for the human.
-        term_pins: dict = {}
-        pins: list = []
-        if (
-            qe_repair
-            and dqf is not None
-            and qe_invoke is not None
-            and (_prior is None or _has_major)
-        ):
-            from .translation_qe import (
-                apply_term_pins,
-                classify_term_fix,
-                harvest_term_pins,
-                make_override_adjudicator,
-                pins_to_renderings,
-            )
-
-            _ln = _LANG_NAME.get(lang, lang)
-            _mqm_now = [s for s in suspects if str(s["kind"]).startswith("mqm-")]
-            # Adjudicate uncorroborated single-judge CJK->CJK flips with the DIFFERENT-family judge
-            # (independent of the primary that usually raises them) — verifies the specific
-            # correction against the source so a right flip (promise->前景) applies while a
-            # wrong-sense one (agent->特工) stays held. Falls back to the primary if no 2nd judge.
-            _adj = make_override_adjudicator(qe_second_judge or qe_invoke, _ln)
-            pins, resolved = harvest_term_pins(
-                records,
-                lang,
-                _mqm_now,
-                logger=logger,
-                classify=lambda c, s, t: classify_term_fix(c, s, t, _ln, qe_invoke),
-                keep_latin=keep_latin_terms(glossary, video_vocab, lang),
-                adjudicate=_adj,
-                curated={
-                    f: t.translations.get(lang, "")
-                    for t in glossary.terms
-                    if t.enforce == "hard"
-                    for f in t.all_source_forms
-                },
-            )
-            if pins:
-                # Cross-video ledger: record these deterministic term fixes so recurring
-                # ones (>= min_videos, consistent rendering) can be auto-promoted to the
-                # shared glossary later (see promote.promote_recurring_terms).
-                if cache_path:
-                    from .promote import record_pins
-
-                    _ticket = Path(cache_path).parent
-                    record_pins(_ticket.parent / "term_ledger.jsonl", pins, lang, _ticket.name)
-                _geff, _ = effective_glossary(glossary, video_vocab, conversational, lang=lang)
-                # Protect keep-Latin identifiers (react-native-video, Acme Q…) from a single-word
-                # pin firing INSIDE them (the 'video'->视频 corrupting 'react-native-video' bug).
-                # SNAPSHOT the pre-pin text + score so the batch can be ROLLED BACK if it
-                # regresses (accept-only-if-better, like qe_repair). A pin harvested from ONE cue
-                # is applied source-gated across ALL cues with that term; for a common word (the
-                # 'you' 我们->你 disaster: fired in ~260 cues, mass-flipping we->you, DQF 96.5->46.9)
-                # that can crater quality. Unconditional application shipped it — now we revert.
-                _pre_txt = {r.i: r.txt for r in records}
-                _pre_dqf, _pre_suspects = dqf, suspects
-                changed2 = apply_term_pins(
-                    records,
-                    pins,
-                    _geff,
-                    lang,
-                    protect=keep_latin_terms(glossary, video_vocab, lang),
-                )
-                if changed2:
-                    _rewrite_cache(cache_path, lang, records)
-                    sub = _subtitle_from_records(
-                        en,
-                        records,
-                        glossary,
-                        lang,
-                        video_vocab,
-                        conversational,
-                        reflow_cache_path=rcp,
-                    )
-                    # RE-JUDGE the pin-changed segments (not just drop the explicitly-resolved
-                    # critiques): a pin fixes the TEXT, so every critique on those cues is now
-                    # stale — re-scoring refreshes them all + keeps the saved qe_state accurate
-                    # (else a stale critique, e.g. 'China left untranslated', survives into the
-                    # next re-review even though the text is fixed).
-                    suspects, dqf = rescore_after_repair(
-                        records,
-                        glossary,
-                        lang,
-                        judges=judges,
-                        lang_name=_LANG_NAME.get(lang, lang),
-                        prior_per_seg=dqf.get("per_seg"),
-                        prior_mqm_suspects=[
-                            s for s in suspects if str(s["kind"]).startswith("mqm-")
-                        ],
-                        changed=list(changed2),
-                        coverage_ran=backcheck,
-                    )
-                    # ACCEPT-ONLY-IF-BETTER: if the pin batch regressed the DQF (a common-word pin
-                    # mass-corrupted the target), REVERT the whole batch to the pre-pin text/score.
-                    # Losing a few good product-name pins (App.tsx…) is far better than shipping a
-                    # crater; the dropped pins still surface as review suggestions.
-                    if (
-                        _pre_dqf is not None
-                        and dqf is not None
-                        and dqf["score"] + 0.5 < _pre_dqf["score"]
-                    ):
-                        for r in records:
-                            if r.i in _pre_txt:
-                                r.txt = _pre_txt[r.i]
-                        _rewrite_cache(cache_path, lang, records)
-                        sub = _subtitle_from_records(
-                            en,
-                            records,
-                            glossary,
-                            lang,
-                            video_vocab,
-                            conversational,
-                            reflow_cache_path=rcp,
-                        )
-                        logger(
-                            f"{lang}: term-pins REVERTED — batch regressed DQF "
-                            f"{_pre_dqf['score']}->{dqf['score']} ({len(pins)} pin(s), "
-                            f"{len(changed2)} cue(s)); kept pre-pin output. Pins left as review "
-                            f"suggestions: {[p['source'] for p in pins]}"
-                        )
-                        suspects, dqf, term_pins, pins = _pre_suspects, _pre_dqf, {}, []
-                    else:
-                        term_pins = pins_to_renderings(pins, lang)
-                        logger(
-                            f"{lang}: term-pin auto-repair — {len(pins)} pin(s) across "
-                            f"{len(changed2)} cue(s) re-judged; {len(resolved)} critique(s) resolved"
-                        )
-
-        # Persist the (final, post-repair) QE panel so the NEXT run can re-review incrementally
-        # — whenever we have a panel (a --qe-judge run, or an auto-refresh from prior state).
-        if dqf is not None and _qe_state_path is not None:
-            save_qe_state(_qe_state_path, records, dqf, suspects)
-
-        # DNT AUTO-CORRECT (self-heal, not just flag): re-translate any sentence where a
-        # keep-Latin term in the source didn't survive in the target. Masking now protects the
-        # term (it's in extra_dnt), so the re-translate is guaranteed to keep it Latin. Only
-        # accepts a re-translation that actually restores the term(s). On a normal run masking
-        # already kept them, so `need` is empty and this costs nothing.
-        _kl = [t for t in keep_latin_terms(glossary, video_vocab, lang) if len(t) >= 3]
-        need = [(r, [t for t in _kl if t in r.src and t not in r.txt]) for r in records]
-        need = [(r, m) for r, m in need if m]
-        if need and qe_invoke is not None:
-            _rt = make_retranslate(
-                en,
-                translator,
-                glossary,
-                lang,
-                exemplar_bank=bank,
-                video_vocab=video_vocab,
-                invoke=qe_invoke,
-                backcheck=backcheck,
-                conversational=conversational,
-            )
-            for r, miss in need:
-                nt = (
-                    _rt(r, f"Keep verbatim in Latin, do NOT translate: {', '.join(miss)}") or ""
-                ).strip()
-                if nt and all(t in nt for t in miss):
-                    r.txt = nt
-                    logger(f"{lang}: DNT auto-correct — re-translated #{r.i} to restore {miss}")
-
-        # RECOMPUTE enforcement issues from the FINAL records — the first-pass `issues` go stale
-        # after qe_repair/term-pin/enforce change a cue (e.g. a transliterated 'Nimbus' since
-        # normalized to Latin still showed as 'expected Nimbus — not found'). Re-enforce each final
-        # record against the effective glossary so the REVIEW's enforcement section is accurate.
-        _geff2, _ = effective_glossary(glossary, video_vocab, conversational, lang=lang)
-        issues = [x for r in records for x in _geff2.enforce(r.txt, r.src, lang)[1]]
-        # FINAL deliverable: rebuild the sub with meaning-aligned LLM RE-FLOW (batched, lossless-
-        # guarded) — the shipping 1:1 format. Runs once per language, using the final records.
-        sub = _subtitle_from_records(
-            en,
-            records,
-            glossary,
-            lang,
-            video_vocab,
-            conversational,
-            invoke=qe_invoke,
-            reflow_cache_path=rcp,
-        )
-        # DURABLE PIN GUARD: reflow (LLM cue-split) can re-emit a harvested pin's avoid-form or
-        # the raw source term even after the record was fixed (memory: reflow-bypasses-term-pins).
-        # Re-apply the run's harvested pins on the FINAL reflowed cue text so no pinned avoid-form
-        # ships. String-level + distinctive-source-gated (see pin_substr_fix).
-        if pins:
-            from .translation_qe import pin_substr_fix
-
-            _n = 0
-            for cue in sub.cues:
-                new_lines = [pin_substr_fix(ln, pins, lang) for ln in cue.lines]
-                if new_lines != cue.lines:
-                    cue.lines = new_lines
-                    _n += 1
-            if _n:
-                logger(f"{lang}: durable pin guard — re-applied pins on {_n} reflowed cue(s)")
-        # DEGENERATE-REPEAT COLLAPSE: auto-fix an immediately-repeated substring the model
-        # sometimes re-emits ('マーケティングマーケティング・…' -> 'マーケティング・…'). Deterministic,
-        # target-side analog of the EN dedupe; >=3-char units only so emphatic short doublings are
-        # safe. (is_repeated_text only FLAGGED this; here it's repaired.)
-        from .cleanup import collapse_immediate_repeats
-
-        _rc = 0
-        for cue in sub.cues:
-            new_lines = [collapse_immediate_repeats(ln) for ln in cue.lines]
-            if new_lines != cue.lines:
-                cue.lines = new_lines
-                _rc += 1
-        if _rc:
-            logger(f"{lang}: collapsed degenerate immediate-repeats in {_rc} cue(s)")
-        # DNT-SURVIVAL AUDIT (backstop, detection independent of masking): each keep-Latin term
-        # in EN must survive verbatim in the target (segmentation-agnostic — see
-        # dnt_survival_violations). Any that don't were translated/garbled despite masking —
-        # surface them so a slip can't ship silently again.
-        dnt_viol = dnt_survival_violations(en, sub, glossary, video_vocab, lang)
-        # Only a term ABSENT from the whole target is a real garble; one that "survived" merely
-        # moved to an adjacent cue on re-segmentation — don't flag it as translated/garbled (that
-        # over-stated the review, sending reviewers to hunt for errors that aren't there).
-        garbled = [v for v in dnt_viol if not v.get("survived")]
-        moved = [v for v in dnt_viol if v.get("survived")]
-        if moved:
-            logger(
-                f"{lang}: DNT-survival — {len(moved)} keep-Latin term(s) present but in an adjacent "
-                f"cue (re-segmentation, not garbled): {sorted({v['term'] for v in moved})}"
-            )
-        if garbled:
-            _terms = sorted({v["term"] for v in garbled})
-            logger(
-                f"{lang}: DNT-survival AUDIT — {len(garbled)} keep-Latin term(s) NOT in the target "
-                f"at all (translated/garbled): {_terms}"
-            )
-            for _v in garbled:
-                suspects.append(
-                    {
-                        "kind": "dnt-not-survived",
-                        "ts": "",
-                        "detail": f"cue {_v['cue']}: keep-Latin term {_v['term']!r} was "
-                        "translated/garbled — should stay Latin verbatim",
-                    }
-                )
-        # ADJACENT-DUPLICATE CLAUSE audit: a cue that repeats a whole line from its neighbor is
-        # usually a re-emit that DISPLACED real content —
-        # surface it for the reviewer (deterministic; not auto-repaired since which cue is correct
-        # needs judgment).
-        for _d in adjacent_duplicate_clauses(sub):
-            suspects.append(
-                {
-                    "kind": "adjacent-duplicate",
-                    "ts": "",
-                    "detail": f"cue {_d['cue']}: repeats a line from the previous cue "
-                    f"({_d['dup'][:40]!r}) — likely a re-emit that dropped this cue's content",
-                }
-            )
-        residuals = [(r.src, r.residual_miss) for r in records if r.residual_miss]
-        lo = LangOutput(
-            lang,
-            sub,
-            enforcement_issues=issues,
-            residuals=residuals,
-            qe_suspects=suspects,
-            conversational=conversational,
-            term_pins=term_pins,
-        )
-        if dqf is not None:
-            lo.qe_metric = "DQF"
-            lo.qe_system_score = dqf["score"]
-            lo.qe_weak_segments = dqf["weak"]
-            lo.qe_pass = dqf["pass"]
-        _write_status(
-            cache_path,
-            phase="done",
-            lang=lang,
-            cues=len(sub.cues),
-            **{f"dqf_{lang}": (dqf["score"] if dqf is not None else None)},
-        )
-        outputs.append(lo)
+            # the final, post-repair panel, so the NEXT run can re-review incrementally
+            save_qe_state(L.qe_state_path, L.records, L.dqf, L.suspects)
+        _dnt_autocorrect(run, L)
+        outputs.append(_finalize_lang(run, L))
     _write_status(cache_path, phase="complete")
     return outputs
+
+
+# ---- video-level preparation (once, shared by every language) ----
+
+
+def _prepare_video(run: _Run) -> None:
+    """Video brief, speaker turns, meaning notes and the names policy -> run.video_vocab."""
+    from .editor import video_brief, video_description
+
+    od = Path(run.cache_path).parent if run.cache_path else None
+    brief = video_brief(
+        " ".join(c.text for c in run.en.cues),
+        run.qe_invoke,
+        run.path("video_brief.txt"),
+        description=video_description(od),
+    )
+    if brief:
+        run.video_vocab = {**(run.video_vocab or {}), "brief": brief}
+        run.logger(f"video brief: {brief[:160]}…")
+    _add_speakers(run, brief or "")
+    _add_meaning_notes(run, brief or "")
+    _apply_names_policy(run, brief or "")
+
+
+def _add_speakers(run: _Run, brief: str) -> None:
+    """Who says each sentence (interviews): ASR diarization if saved, else one LLM pass."""
+    from .speakers import label_speakers
+
+    try:
+        spk = label_speakers(
+            merge_en_to_sentences(run.en),
+            run.qe_invoke,
+            run.path("speakers.json"),
+            brief=brief,
+            raw_path=run.path("raw.json"),
+            logger=run.logger,
+        )
+    except Exception as e:  # never sink a run on speaker labeling
+        run.logger(f"speaker labeling skipped ({type(e).__name__})")
+        spk = []
+    if spk:
+        run.video_vocab = {**(run.video_vocab or {}), "speakers": spk}
+
+
+def _add_meaning_notes(run: _Run, brief: str) -> None:
+    """Idioms / ambiguous phrases resolved ONCE in the English, shared by every language."""
+    from .en_gloss import meaning_notes
+
+    try:
+        mn = meaning_notes(
+            merge_en_to_sentences(run.en),
+            run.qe_invoke,
+            run.path("meaning_notes.json"),
+            brief=brief,
+        )
+    except Exception as e:  # never sink a run on it
+        run.logger(f"meaning notes skipped ({type(e).__name__})")
+        mn = {}
+    if mn:
+        run.video_vocab = {**(run.video_vocab or {}), "meaning_notes": mn}
+        run.logger(
+            f"meaning notes: {sum(len(v) for v in mn.values())} phrase(s) resolved for the translators"
+        )
+
+
+def _apply_names_policy(run: _Run, brief: str) -> None:
+    """Partner companies stay Latin (or their own official localized name); ordinary-word products
+    get ONE rendering — the partner's official one when its site has it (locked in partners.yaml).
+    """
+    from .entities import apply_policy, names_policy
+
+    try:
+        pol = names_policy(
+            " ".join(c.text for c in run.en.cues),
+            run.qe_invoke,
+            run.path("entities.json"),
+            brief=brief,
+        )
+    except Exception as e:  # never sink a run on it
+        run.logger(f"names policy skipped ({type(e).__name__})")
+        pol = {}
+    if pol.get("ordinary_products"):
+        try:
+            from .entities import resolve_official
+            from .search import web_search
+            from .vocab_prep import http_fetch
+
+            pol = resolve_official(
+                pol,
+                web_search=web_search,
+                web_fetch=http_fetch,
+                invoke=run.qe_invoke,
+                langs=run.langs,
+                logger=run.logger,
+            )
+        except Exception as e:
+            run.logger(f"official-name lookup skipped ({type(e).__name__})")
+    if pol.get("companies") or pol.get("ordinary_products"):
+        run.video_vocab = apply_policy(run.video_vocab, pol, run.langs)
+        run.logger(
+            f"names policy: keep Latin {pol.get('companies')}; translate "
+            f"{[(x.get('name'), x.get('ja'), x.get('zh-Hans')) for x in pol.get('ordinary_products', [])]}"
+        )
+
+
+# ---- per-language stages ----
+
+
+def _translate_lang(run: _Run, lang: str) -> _LangRun:
+    L = _LangRun(lang)
+    L.bank = (
+        run.exemplar_bank_for(lang)
+        if run.exemplar_bank_for
+        else (run.tm.bank(lang) if run.tm is not None else None)
+    )
+    L.rcp = run.path(f"reflow_cache.{lang}.json")
+    _write_status(run.cache_path, phase="translate", lang=lang)
+    L.sub, L.issues, L.records = translate_subtitle(
+        run.en,
+        run.translator,
+        run.glossary,
+        lang,
+        exemplar_bank=L.bank,
+        video_vocab=run.video_vocab,
+        tm=run.tm,
+        invoke=run.invoke,
+        backcheck=run.backcheck,
+        cache_path=run.cache_path,
+        conversational=run.conversational,
+        logger=run.logger,
+    )
+    return L
+
+
+def _condense_pass(run: _Run, L: _LangRun) -> None:
+    """CONDENSATION (ja, ON by default; --no-condense): tighten finished translations like a
+    subtitle editor before QE, so the panel judges what ships. See dev_titles/condense.py."""
+    if not (run.condense and L.lang == "ja" and run.qe_invoke is not None and L.records):
+        return
+    from .condense import condense_lang
+
+    spec = spec_for(L.lang)
+    sents = merge_en_to_sentences(run.en)
+    # per-sentence character budget = reading-speed limit x the sentence's speech window
+    budgets = {
+        i: max(int(spec.max_cps * max(s.end - s.start, spec.min_dur)), 6)
+        for i, s in enumerate(sents)
+    }
+    # ...but only lines CLEARLY too fast are touched: native-reviewed ja ships 20% of cues
+    # above 8.5 cps (p90 ~10.2), and squeezing near-limit lines to the exact budget is what
+    # produced broken grammar / dropped greetings on a tutorial test.
+    trig_cps = float(os.environ.get("SUBTITLE_CONDENSE_TRIGGER_CPS", "10.0"))
+    # LONG LISTS ("JavaScript, TypeScript, ReScript, Java, Kotlin…") are hard to read even
+    # just over the limit — native graders flagged them — so a list sentence (>=3 commas)
+    # triggers at the target budget itself, not the looser 10 cps.
+    triggers = {
+        i: (
+            budgets[i]
+            if s.text.count(",") >= 3
+            else max(int(trig_cps * max(s.end - s.start, spec.min_dur)), 6)
+        )
+        for i, s in enumerate(sents)
+    }
+    chg = condense_lang(
+        L.records,
+        run.qe_invoke,
+        L.lang,
+        L.name,
+        run.path(f"condense_state.{L.lang}.json"),
+        coverage_missing=coverage_missing,
+        normalize=_normalizer(L.lang, run.conversational),
+        logger=run.logger,
+        budgets=budgets,
+        triggers=triggers,
+        min_width=spec.max_cpl,
+    )
+    if chg:
+        _rewrite_cache(run.cache_path, L.lang, L.records)
+        run.logger(f"{L.lang}: condensed {len(chg)} line(s)")
+
+
+def _editor_pass(run: _Run, L: _LangRun) -> None:
+    """NATIVE-EDITOR pass (ON by default; --no-editor): a native subtitle editor flags only lines a
+    native viewer would notice and proposes minimal rewrites, accepted past the token/number guards
+    AND a pairwise check by the second-family judge; then the REPLY check at speaker turns. Runs
+    before QE so the panel scores what ships. See dev_titles/editor.py."""
+    if not (run.native_editor and run.qe_invoke is not None and L.records):
+        return
+    from .editor import native_edit
+
+    vv = run.video_vocab or {}
+    st = (getattr(run.glossary, "style", {}) or {}).get(L.lang, {}) or {}
+    reg = st.get("register_conversational" if run.conversational else "register", "")
+    src_all = " ".join(r.src for r in L.records).lower()
+    terms = [
+        t.translations.get(L.lang, "")
+        for t in effective_glossary(run.glossary, run.video_vocab, run.conversational, lang=L.lang)[
+            0
+        ].terms
+        if t.enforce == "hard" and t.source.lower() in src_all
+    ]
+    ech = native_edit(
+        L.records,
+        run.qe_invoke,
+        L.lang,
+        L.name,
+        run.path(f"editor_state.{L.lang}.json"),
+        normalize=_normalizer(L.lang, run.conversational),
+        pair_judge=run.qe_second_judge,
+        brief=vv.get("brief", ""),
+        register=str(reg)[:300],
+        glossary_terms=terms,
+        speakers=vv.get("speakers") or None,
+        meaning_notes=vv.get("meaning_notes") or None,
+        logger=run.logger,
+    )
+    if ech:
+        _rewrite_cache(run.cache_path, L.lang, L.records)
+        run.logger(f"{L.lang}: native editor rewrote {len(ech)} line(s)")
+    if vv.get("speakers"):
+        from .editor import reply_edit
+
+        rch = reply_edit(
+            L.records,
+            run.qe_invoke,
+            L.lang,
+            L.name,
+            vv["speakers"],
+            normalize=_normalizer(L.lang, run.conversational),
+            pair_judge=run.qe_second_judge,
+            brief=vv.get("brief", ""),
+            state_path=run.path(f"reply_state.{L.lang}.json"),
+            logger=run.logger,
+        )
+        if rch:
+            _rewrite_cache(run.cache_path, L.lang, L.records)
+            run.logger(f"{L.lang}: reply check rewrote {len(rch)} line(s)")
+
+
+def _review_pass(run: _Run, L: _LangRun) -> None:
+    """QE review. If a prior QE state exists for this out dir, re-judge ONLY the segments whose
+    translation changed and reuse the stored panel for the rest (loaded REGARDLESS of --qe-judge, so
+    any later run refreshes the REVIEW incrementally and the DQF + MQM tiers are never silently
+    dropped); else the full first review. The repair passes then run whenever a major/critical is
+    flagged, regardless of the DQF pass bar."""
+    from .translation_qe import (
+        build_judges,
+        incremental_review,
+        load_qe_state,
+        translation_suspects,
+    )
+
+    L.qe_state_path = run.path(f"qe_state.{L.lang}.json")
+    L.prior = load_qe_state(L.qe_state_path) if L.qe_state_path else None
+    if L.prior is not None and run.qe_invoke is not None:
+        (L.suspects, L.dqf), chg = incremental_review(
+            L.records,
+            run.glossary,
+            L.lang,
+            judges=build_judges(run.qe_invoke, run.qe_second_judge),
+            lang_name=L.name,
+            prior_state=L.prior,
+            coverage_ran=run.backcheck,
+        )
+        run.logger(
+            f"{L.lang}: incremental re-review — re-judged {len(chg)} changed segment(s)"
+            + _dqf_note(L.dqf)
+        )
+    else:
+        L.suspects, L.dqf = translation_suspects(
+            L.records,
+            run.glossary,
+            L.lang,
+            invoke=run.qe_invoke,
+            judge=run.qe_judge,
+            second_judge=run.qe_second_judge,
+            coverage_ran=run.backcheck,
+        )
+        run.logger(f"{L.lang}: translation QE — {len(L.suspects)} suspect(s)" + _dqf_note(L.dqf))
+    # gate the repair passes on the PRESENCE of a fixable defect, not the DQF pass threshold:
+    # accept-only-if-better can't regress, and a clean panel is a fast no-op
+    L.has_major = _has_major(L.suspects)
+
+
+def _condensation_revert(run: _Run, L: _LangRun) -> None:
+    """Condensation is checked for lost meaning, not broken grammar or tone: any condensed line a
+    judge flagged (major OR minor, either judge) is offered its pre-condensation text back,
+    accept-only-if-better on the same panel."""
+    from .condense import load_originals, mark_processed
+    from .translation_qe import build_judges
+    from .translation_qe import qe_repair as _qe_repair
+    from .translation_qe import rescore_after_repair
+
+    cond_sp = run.path(f"condense_state.{L.lang}.json")
+    orig = load_originals(cond_sp, L.records) if (run.qe_repair and L.dqf is not None) else {}
+    flagged = {
+        s["i"] for s in L.suspects if s.get("i") is not None and s["kind"].startswith("mqm-")
+    }
+    revert = sorted(i for i in orig if i in flagged)
+    if not revert:
+        return
+    assert L.dqf is not None
+    L.judges = build_judges(run.qe_invoke, run.qe_second_judge)
+    mqm = [s for s in L.suspects if s["kind"].startswith("mqm-")]
+    reverted = _qe_repair(
+        L.records,
+        L.lang,
+        judges=L.judges,
+        lang_name=L.name,
+        retranslate=lambda rec, _crit: orig.get(rec.i, ""),
+        per_seg={i: v for i, v in (L.dqf.get("per_seg") or {}).items() if i in revert},
+        judge_suspects=[s for s in mqm if s["i"] in revert],
+        compare_judges=L.judges,
+        extra_flags=revert,
+        cmp_samples=3,
+        logger=run.logger,
+    )
+    if reverted:
+        mark_processed(cond_sp, [r for r in L.records if r.i in reverted])
+        _rewrite_cache(run.cache_path, L.lang, L.records)
+        L.suspects, L.dqf = rescore_after_repair(
+            L.records,
+            run.glossary,
+            L.lang,
+            judges=L.judges,
+            lang_name=L.name,
+            prior_per_seg=L.dqf.get("per_seg"),
+            prior_mqm_suspects=mqm,
+            changed=reverted,
+            coverage_ran=run.backcheck,
+        )
+        L.has_major = _has_major(L.suspects)
+    run.logger(
+        f"{L.lang}: condensation revert — {len(reverted)}/{len(revert)} flagged condensed "
+        f"line(s) restored" + _dqf_note(L.dqf, " -> ")
+    )
+
+
+def _qe_repair_pass(run: _Run, L: _LangRun) -> None:
+    """QE-guided auto-repair (Layer B): re-translate judge-flagged majors + deterministic garbles
+    with the critique as a constraint; accept only if the full panel's re-judge improves. Native-
+    editor rewrites are PROTECTED, and every repair must also win a native-viewer pairwise check."""
+    if not (run.qe_repair and L.dqf is not None and (L.prior is None or L.has_major)):
+        return
+    from .editor import editor_rewritten, repair_check
+    from .translation_qe import build_judges
+    from .translation_qe import qe_repair as _qe_repair
+    from .translation_qe import rescore_after_repair
+
+    protected = (
+        editor_rewritten(run.path(f"editor_state.{L.lang}.json"), L.records)
+        if (run.cache_path and run.native_editor)
+        else set()
+    )
+    accept_check = (
+        repair_check(run.qe_invoke, L.name, L.records)
+        if (run.native_editor and run.qe_invoke is not None)
+        else None
+    )
+    L.judges = build_judges(run.qe_invoke, run.qe_second_judge)
+    mqm = [s for s in L.suspects if s["kind"].startswith("mqm-")]
+    extra = sorted(
+        {
+            s["i"]
+            for s in L.suspects
+            if s["i"] is not None and s["kind"] in ("dropped-token", "latin-typo?")
+        }
+    )
+    # term-inconsistency -> repair the offending cues toward the canonical rendering
+    extra_crit: dict[int, str] = {}
+    for s in L.suspects:
+        if s["kind"] == "term-inconsistency":
+            note = (
+                f"render '{s['source']}' as '{s['target']}' — its canonical rendering "
+                f"used elsewhere in this video (consistency)"
+            )
+            for ci in s.get("fix_idx", []):
+                extra_crit[ci] = (extra_crit[ci] + "; " + note) if ci in extra_crit else note
+    retrans = make_retranslate(
+        run.en,
+        run.translator,
+        run.glossary,
+        L.lang,
+        exemplar_bank=L.bank,
+        video_vocab=run.video_vocab,
+        invoke=run.invoke,
+        backcheck=run.backcheck,
+        conversational=run.conversational,
+    )
+    # Accept/reject uses the FULL panel (both judges): a second-judge-caught major is invisible to a
+    # one-judge compare, so a genuine fix could never register; a fabrication still fails.
+    fixed = _qe_repair(
+        L.records,
+        L.lang,
+        judges=L.judges,
+        lang_name=L.name,
+        retranslate=retrans,
+        per_seg=L.dqf.get("per_seg"),
+        judge_suspects=mqm,
+        compare_judges=L.judges,
+        include_minor=True,
+        extra_flags=extra,
+        extra_critiques=extra_crit,
+        cmp_samples=3,
+        logger=run.logger,
+        protected=protected,
+        accept_check=accept_check,
+    )
+    if fixed:
+        _rewrite_cache(run.cache_path, L.lang, L.records)
+        # re-score ONLY the changed segments against the prior panel
+        L.suspects, L.dqf = rescore_after_repair(
+            L.records,
+            run.glossary,
+            L.lang,
+            judges=L.judges,
+            lang_name=L.name,
+            prior_per_seg=L.dqf.get("per_seg"),
+            prior_mqm_suspects=mqm,
+            changed=fixed,
+            coverage_ran=run.backcheck,
+        )
+        run.logger(
+            f"{L.lang}: QE-repair fixed {len(fixed)} segment(s) -> "
+            + (_dqf_note(L.dqf, "") or "(no re-score)")
+        )
+
+
+def _term_pin_pass(run: _Run, L: _LangRun) -> None:
+    """TERM-PIN auto-repair (Layer C): a wrong term rendering often scores ~equal, so accept-if-
+    better rejects it. Classify each remaining critique as a term fix vs a judgment call; pin term
+    fixes source->correct and enforce them deterministically across all cues. The whole batch is
+    rolled back if it regresses DQF (a common-word pin once mass-flipped we->you, 96.5 -> 46.9)."""
+    if not (
+        run.qe_repair
+        and L.dqf is not None
+        and run.qe_invoke is not None
+        and (L.prior is None or L.has_major)
+    ):
+        return
+    from .translation_qe import (
+        apply_term_pins,
+        build_judges,
+        classify_term_fix,
+        harvest_term_pins,
+        make_override_adjudicator,
+        pins_to_renderings,
+        rescore_after_repair,
+    )
+
+    ln = L.name
+    mqm_now = [s for s in L.suspects if str(s["kind"]).startswith("mqm-")]
+    # adjudicate uncorroborated single-judge CJK->CJK flips with the DIFFERENT-family judge
+    adj = make_override_adjudicator(run.qe_second_judge or run.qe_invoke, ln)
+    pins, resolved = harvest_term_pins(
+        L.records,
+        L.lang,
+        mqm_now,
+        logger=run.logger,
+        classify=lambda c, s, t: classify_term_fix(c, s, t, ln, run.qe_invoke),
+        keep_latin=keep_latin_terms(run.glossary, run.video_vocab, L.lang),
+        adjudicate=adj,
+        curated={
+            f: t.translations.get(L.lang, "")
+            for t in run.glossary.terms
+            if t.enforce == "hard"
+            for f in t.all_source_forms
+        },
+    )
+    if not pins:
+        return
+    L.pins = pins
+    if run.cache_path:
+        # cross-video ledger: recurring deterministic fixes can be promoted to the shared glossary
+        from .promote import record_pins
+
+        ticket = Path(run.cache_path).parent
+        record_pins(ticket.parent / "term_ledger.jsonl", pins, L.lang, ticket.name)
+    geff, _ = effective_glossary(run.glossary, run.video_vocab, run.conversational, lang=L.lang)
+    pre_txt = {r.i: r.txt for r in L.records}
+    pre_dqf, pre_suspects = L.dqf, L.suspects
+    changed2 = apply_term_pins(
+        L.records,
+        pins,
+        geff,
+        L.lang,
+        protect=keep_latin_terms(run.glossary, run.video_vocab, L.lang),
+    )
+    if not changed2:
+        return
+    _rewrite_cache(run.cache_path, L.lang, L.records)
+    # re-judge the pin-changed segments: every critique on those cues is now stale
+    judges = L.judges or build_judges(run.qe_invoke, run.qe_second_judge)
+    L.suspects, L.dqf = rescore_after_repair(
+        L.records,
+        run.glossary,
+        L.lang,
+        judges=judges,
+        lang_name=L.name,
+        prior_per_seg=L.dqf.get("per_seg"),
+        prior_mqm_suspects=[s for s in L.suspects if str(s["kind"]).startswith("mqm-")],
+        changed=list(changed2),
+        coverage_ran=run.backcheck,
+    )
+    if pre_dqf is not None and L.dqf is not None and L.dqf["score"] + 0.5 < pre_dqf["score"]:
+        # ACCEPT-ONLY-IF-BETTER: revert the whole batch to the pre-pin text/score
+        for r in L.records:
+            if r.i in pre_txt:
+                r.txt = pre_txt[r.i]
+        _rewrite_cache(run.cache_path, L.lang, L.records)
+        run.logger(
+            f"{L.lang}: term-pins REVERTED — batch regressed DQF "
+            f"{pre_dqf['score']}->{L.dqf['score']} ({len(pins)} pin(s), "
+            f"{len(changed2)} cue(s)); kept pre-pin output. Pins left as review "
+            f"suggestions: {[p['source'] for p in pins]}"
+        )
+        L.suspects, L.dqf, L.term_pins, L.pins = pre_suspects, pre_dqf, {}, []
+    else:
+        L.term_pins = pins_to_renderings(pins, L.lang)
+        run.logger(
+            f"{L.lang}: term-pin auto-repair — {len(pins)} pin(s) across "
+            f"{len(changed2)} cue(s) re-judged; {len(resolved)} critique(s) resolved"
+        )
+
+
+def _dnt_autocorrect(run: _Run, L: _LangRun) -> None:
+    """Self-heal: re-translate any sentence where a keep-Latin source term didn't survive in the
+    target (masking now protects it); accept only a re-translation that restores the term(s)."""
+    kl = [t for t in keep_latin_terms(run.glossary, run.video_vocab, L.lang) if len(t) >= 3]
+    need = [(r, [t for t in kl if t in r.src and t not in r.txt]) for r in L.records]
+    need = [(r, m) for r, m in need if m]
+    if not (need and run.qe_invoke is not None):
+        return
+    rt = make_retranslate(
+        run.en,
+        run.translator,
+        run.glossary,
+        L.lang,
+        exemplar_bank=L.bank,
+        video_vocab=run.video_vocab,
+        invoke=run.qe_invoke,
+        backcheck=run.backcheck,
+        conversational=run.conversational,
+    )
+    for r, miss in need:
+        nt = (rt(r, f"Keep verbatim in Latin, do NOT translate: {', '.join(miss)}") or "").strip()
+        if nt and all(t in nt for t in miss):
+            r.txt = nt
+            run.logger(f"{L.lang}: DNT auto-correct — re-translated #{r.i} to restore {miss}")
+
+
+def _finalize_lang(run: _Run, L: _LangRun) -> LangOutput:
+    """Final enforcement issues, the deliverable subtitle, deterministic last fixes and audits."""
+    # enforcement issues recomputed from the FINAL records (the first-pass ones go stale)
+    geff2, _ = effective_glossary(run.glossary, run.video_vocab, run.conversational, lang=L.lang)
+    issues = [x for r in L.records for x in geff2.enforce(r.txt, r.src, L.lang)[1]]
+    sub = _subtitle_from_records(
+        run.en,
+        L.records,
+        run.glossary,
+        L.lang,
+        run.video_vocab,
+        run.conversational,
+        invoke=run.qe_invoke,
+        reflow_cache_path=L.rcp,
+    )
+    if L.pins:
+        # DURABLE PIN GUARD: reflow can re-emit a pinned avoid-form; re-apply on the final cue text
+        from .translation_qe import pin_substr_fix
+
+        n = 0
+        for cue in sub.cues:
+            new_lines = [pin_substr_fix(ln, L.pins, L.lang) for ln in cue.lines]
+            if new_lines != cue.lines:
+                cue.lines = new_lines
+                n += 1
+        if n:
+            run.logger(f"{L.lang}: durable pin guard — re-applied pins on {n} reflowed cue(s)")
+    # DEGENERATE-REPEAT COLLAPSE ('マーケティングマーケティング・…' -> 'マーケティング・…'), >=3-char units
+    from .cleanup import collapse_immediate_repeats
+
+    rc = 0
+    for cue in sub.cues:
+        new_lines = [collapse_immediate_repeats(ln) for ln in cue.lines]
+        if new_lines != cue.lines:
+            cue.lines = new_lines
+            rc += 1
+    if rc:
+        run.logger(f"{L.lang}: collapsed degenerate immediate-repeats in {rc} cue(s)")
+    suspects = L.suspects
+    # DNT-SURVIVAL AUDIT: a keep-Latin term ABSENT from the whole target is a real garble; one that
+    # merely moved to an adjacent cue on re-segmentation is not
+    dnt_viol = dnt_survival_violations(run.en, sub, run.glossary, run.video_vocab, L.lang)
+    garbled = [v for v in dnt_viol if not v.get("survived")]
+    moved = [v for v in dnt_viol if v.get("survived")]
+    if moved:
+        run.logger(
+            f"{L.lang}: DNT-survival — {len(moved)} keep-Latin term(s) present but in an adjacent "
+            f"cue (re-segmentation, not garbled): {sorted({v['term'] for v in moved})}"
+        )
+    if garbled:
+        run.logger(
+            f"{L.lang}: DNT-survival AUDIT — {len(garbled)} keep-Latin term(s) NOT in the target "
+            f"at all (translated/garbled): {sorted({v['term'] for v in garbled})}"
+        )
+        for v in garbled:
+            suspects.append(
+                {
+                    "kind": "dnt-not-survived",
+                    "ts": "",
+                    "detail": f"cue {v['cue']}: keep-Latin term {v['term']!r} was "
+                    "translated/garbled — should stay Latin verbatim",
+                }
+            )
+    # ADJACENT-DUPLICATE CLAUSE audit: usually a re-emit that displaced real content
+    for d in adjacent_duplicate_clauses(sub):
+        suspects.append(
+            {
+                "kind": "adjacent-duplicate",
+                "ts": "",
+                "detail": f"cue {d['cue']}: repeats a line from the previous cue "
+                f"({d['dup'][:40]!r}) — likely a re-emit that dropped this cue's content",
+            }
+        )
+    lo = LangOutput(
+        L.lang,
+        sub,
+        enforcement_issues=issues,
+        residuals=[(r.src, r.residual_miss) for r in L.records if r.residual_miss],
+        qe_suspects=suspects,
+        conversational=run.conversational,
+        term_pins=L.term_pins,
+    )
+    if L.dqf is not None:
+        lo.qe_metric = "DQF"
+        lo.qe_system_score = L.dqf["score"]
+        lo.qe_weak_segments = L.dqf["weak"]
+        lo.qe_pass = L.dqf["pass"]
+    _write_status(
+        run.cache_path,
+        phase="done",
+        lang=L.lang,
+        cues=len(sub.cues),
+        **{f"dqf_{L.lang}": (L.dqf["score"] if L.dqf is not None else None)},
+    )
+    return lo

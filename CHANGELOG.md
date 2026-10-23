@@ -3,6 +3,20 @@
 All notable changes to dev-titles. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and module APIs may still change).
 
+## [0.2.2] — 2026-10-23
+
+### Changed
+- Internal refactor, no behavior change: the localization pipeline (a 726-line function) is now a
+  driver over per-stage functions sharing run / per-language state; the CLI's `run` (378 lines),
+  the EN review and the argument parser are split the same way, and `run` / `localize` share one
+  translate step and one definition of their 17 common options. Checked against the previous
+  version with a fake model: identical subtitles, side files, cache, QE state, stdout and
+  parsed arguments.
+
+### Fixed
+- An EN-review fix on a `localize` run whose output dir had no `en.vtt` saved the corrected EN
+  without `en.orig.vtt`, so a re-run translated the uncorrected input. The original is now kept.
+
 ## [0.2.1] — 2026-10-23
 
 ### Fixed

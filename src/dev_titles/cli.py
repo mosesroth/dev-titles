@@ -201,105 +201,57 @@ def _persist_term_pins(outputs, out) -> None:
             print(f"    [{lang}] {src!r} -> {spec['canonical']!r} (avoid {spec.get('avoid', [])})")
 
 
-def _en_review(en, out, title: str = "", en_style: str | None = None):
-    """General editorial review of the EN script (spelling, grammar, terminology, garbled
-    phrasing) — the standard proofread any script gets, run on ANY EN source (a human transcript
-    carries errors too, e.g. OpenTelemetry/'open telemetry').
-
-    STANDARD PROCEDURE (mirrors QE auto-repair): auto-APPLY the clear-error fixes to the EN and HOLD
-    the judgment calls for the operator (policy: auto-apply clear-error fixes, a human
-    adjudicates the rest). When fixes are applied, the corrected EN is written to `out/en.vtt` (original preserved
-    as `out/en.orig.vtt`) and RETURNED so translation runs on the corrected source. en_review.md
-    lists what was auto-applied + what needs adjudication. Runs once per out dir (skipped if
-    en_review.md already exists). Returns the (possibly corrected) EN subtitle."""
-    from pathlib import Path
-
+def _write_en_keep_orig(out, en_before, en_after) -> None:
+    """Write the corrected EN to `out/en.vtt`, first preserving the original as `en.orig.vtt`
+    (once: the earliest original wins)."""
     from .formats.vtt import write_vtt
 
-    rpath = Path(out) / "en_review.md"
-    if rpath.exists():
-        # a re-run: translate the CORRECTED EN this step saved (clean-read / review fixes), not the input
-        saved = Path(out) / "en.vtt"
-        if saved.exists() and (Path(out) / "en.orig.vtt").exists():
-            return _read_any(str(saved), "en")
-        return en
-    from . import llm
-    from .en_cleanread import clean_read, speech_style
-    from .transcribe_qe import en_autofix
-    from .transcribe_qe import en_review as _rev
+    p, orig = Path(out) / "en.vtt", Path(out) / "en.orig.vtt"
+    if not orig.exists():
+        orig.write_text(
+            p.read_text(encoding="utf-8") if p.exists() else write_vtt(en_before), encoding="utf-8"
+        )
+    p.write_text(write_vtt(en_after), encoding="utf-8")
 
-    invoke = llm.invoke()
-    # CLEAN-READ unscripted speech first (deletions / punctuation only), so the review and the sign-off
-    # see the cleaned script. Scripted videos (tutorials, keynotes) are left as written.
+
+def _clean_read_stage(en, out, invoke, title: str, en_style: str | None):
+    """CLEAN-READ unscripted speech (deletions / punctuation only), so the review and the sign-off
+    see the cleaned script. Scripted videos (tutorials, keynotes) are left as written. Returns the
+    (possibly cleaned) EN and the en_review.md section describing it."""
+    from .en_cleanread import clean_read, speech_style
+
     style = speech_style(en, invoke, title, Path(out) / "en_style.json", override=en_style)
-    cleaned, _rej = [], 0
+    cleaned, rejected = [], 0
     if style["style"] == "unscripted":
         try:
-            en_c, cleaned, _rej = clean_read(en, invoke)
+            en_c, cleaned, rejected = clean_read(en, invoke)
         except Exception as e:
             print(f"EN clean-read skipped ({type(e).__name__})")
             en_c = en
         if cleaned:
-            p = Path(out) / "en.vtt"
-            if p.exists() and not (Path(out) / "en.orig.vtt").exists():
-                (Path(out) / "en.orig.vtt").write_text(
-                    p.read_text(encoding="utf-8"), encoding="utf-8"
-                )
-            elif not (Path(out) / "en.orig.vtt").exists():
-                (Path(out) / "en.orig.vtt").write_text(write_vtt(en), encoding="utf-8")
-            p.write_text(write_vtt(en_c), encoding="utf-8")
+            _write_en_keep_orig(out, en, en_c)
             en = en_c
         print(
-            f"EN clean-read ({style['style']}: {style['why']}): {len(cleaned)} cue(s) cleaned, {_rej} rejected"
+            f"EN clean-read ({style['style']}: {style['why']}): {len(cleaned)} cue(s) cleaned, {rejected} rejected"
         )
     else:
         print(f"EN clean-read skipped: scripted ({style['why']})")
-    cr_lines = [
+    md = [
         f"## Clean-read ({style['style']}: {style['why']}) — {len(cleaned)} cue(s), deletions only",
         "",
     ]
-    cr_lines += (
-        [
+    if cleaned:
+        md += ["| Time | Before | After |", "|---|---|---|"]
+        md += [
             f"| {int(c['start']) // 60:02d}:{int(c['start']) % 60:02d} | {c['old']!r} | {c['new']!r} |"
             for c in cleaned
         ]
-        if cleaned
-        else ["_None._"]
-    )
-    cr_lines = (
-        (cr_lines[:2] + ["| Time | Before | After |", "|---|---|---|"] + cr_lines[2:])
-        if cleaned
-        else cr_lines
-    )
-    cr_lines.append("")
-    from . import en_gate
+    else:
+        md += ["_None._"]
+    return en, md + [""]
 
-    try:
-        issues = _rev(en, invoke)
-    except Exception as e:
-        print(f"EN review FAILED ({type(e).__name__}) — translation is blocked until it runs")
-        en_gate.save_review_state(out, "failed", [])
-        return en
-    if not issues:
-        en_gate.save_review_state(out, "ok", [])
-        rpath.write_text(
-            f"# EN editorial review — {title}\n\n"
-            + "\n".join(cr_lines)
-            + "\nNo editorial issues flagged.\n",
-            encoding="utf-8",
-        )
-        print("EN review: no editorial issues flagged.")
-        return en
-    try:
-        new_en, applied, held = en_autofix(en, issues, invoke)
-    except Exception as e:
-        print(f"EN autofix skipped ({type(e).__name__})")
-        new_en, applied, held = en, [], issues
-    if applied:  # persist corrected EN; keep the original
-        p = Path(out) / "en.vtt"
-        if p.exists() and not (Path(out) / "en.orig.vtt").exists():
-            (Path(out) / "en.orig.vtt").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
-        p.write_text(write_vtt(new_en), encoding="utf-8")
+
+def _en_review_md(title: str, cr_lines: list[str], applied: list, held: list) -> str:
     lines = [
         f"# EN editorial review — {title}".rstrip(),
         "",
@@ -322,7 +274,57 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
         lines += [f"| {s['ts']} | {s['kind']} | {s['detail']} |" for s in held]
     else:
         lines += ["_None._"]
-    rpath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
+
+
+def _en_review(en, out, title: str = "", en_style: str | None = None):
+    """General editorial review of the EN script (spelling, grammar, terminology, garbled
+    phrasing) — the standard proofread any script gets, run on ANY EN source (a human transcript
+    carries errors too, e.g. OpenTelemetry/'open telemetry').
+
+    STANDARD PROCEDURE (mirrors QE auto-repair): auto-APPLY the clear-error fixes to the EN and HOLD
+    the judgment calls for the operator (policy: auto-apply clear-error fixes, a human
+    adjudicates the rest). When fixes are applied, the corrected EN is written to `out/en.vtt` (original preserved
+    as `out/en.orig.vtt`) and RETURNED so translation runs on the corrected source. en_review.md
+    lists what was auto-applied + what needs adjudication. Runs once per out dir (skipped if
+    en_review.md already exists). Returns the (possibly corrected) EN subtitle."""
+    rpath = Path(out) / "en_review.md"
+    if rpath.exists():
+        # a re-run: translate the CORRECTED EN this step saved (clean-read / review fixes), not the input
+        saved = Path(out) / "en.vtt"
+        if saved.exists() and (Path(out) / "en.orig.vtt").exists():
+            return _read_any(str(saved), "en")
+        return en
+    from . import en_gate, llm
+    from .transcribe_qe import en_autofix
+    from .transcribe_qe import en_review as _rev
+
+    invoke = llm.invoke()
+    en, cr_lines = _clean_read_stage(en, out, invoke, title, en_style)
+    try:
+        issues = _rev(en, invoke)
+    except Exception as e:
+        print(f"EN review FAILED ({type(e).__name__}) — translation is blocked until it runs")
+        en_gate.save_review_state(out, "failed", [])
+        return en
+    if not issues:
+        en_gate.save_review_state(out, "ok", [])
+        rpath.write_text(
+            f"# EN editorial review — {title}\n\n"
+            + "\n".join(cr_lines)
+            + "\nNo editorial issues flagged.\n",
+            encoding="utf-8",
+        )
+        print("EN review: no editorial issues flagged.")
+        return en
+    try:
+        new_en, applied, held = en_autofix(en, issues, invoke)
+    except Exception as e:
+        print(f"EN autofix skipped ({type(e).__name__})")
+        new_en, applied, held = en, [], issues
+    if applied:  # persist corrected EN; keep the original
+        _write_en_keep_orig(out, en, new_en)
+    rpath.write_text(_en_review_md(title, cr_lines, applied, held), encoding="utf-8")
     en_gate.save_review_state(
         out, "ok", [{k: s.get(k, "") for k in ("ts", "kind", "detail")} for s in held], len(applied)
     )
@@ -345,20 +347,58 @@ def _looks_like_raw_caption(en) -> bool:
     return fillers >= 3 or overlong / len(lines) > 0.2
 
 
-def cmd_localize(args) -> int:
-    """EN subtitle -> zh-Hans/ja review-ready cues (translate + glossary + register +
-    reflect + completeness gates + CJK re-segmentation), then a review bundle."""
-    from . import llm
-    from .cue_builder import strip_sound_tags
-    from .glossary import load as load_glossary
+def _translate_and_bundle(
+    args, en, out: Path, glossary, video_vocab, *, title: str, en_path: str, cache_path
+) -> int:
+    """The shared translate half of `localize` and `run`: EN review + sign-off gate, then
+    localize_en into every language, persist harvested term pins, write the review bundle."""
+    from . import en_gate, llm
     from .localize import localize_en
     from .review import build_review_bundle
 
-    en = strip_sound_tags(_read_any(args.input, "en"))  # [music]/(applause) never reach translation
-    glossary = load_glossary(args.glossary)
     langs = args.lang or ["zh-Hans", "ja"]
+    bank_for = _exemplar_bank_for(args, langs)
+    en = _en_review(en, out, title, getattr(args, "en_style", None))
+    if not en_gate.require(en, out, en_path):
+        return 3
+    print(
+        f"Localizing {en_path} -> {', '.join(langs)} (glossary={args.glossary}"
+        f"{', vocab=' + args.vocab if args.vocab else ''})…"
+    )
+    _save_description_file(args)
+    outputs = localize_en(
+        en,
+        llm.translator(),
+        glossary,
+        langs=langs,
+        video_vocab=video_vocab,
+        backcheck=not args.no_backcheck,
+        exemplar_bank_for=bank_for,
+        tm=_translation_memory(args, langs),
+        qe_judge=args.qe_judge,
+        qe_second_judge=_qe_second_judge(args),
+        qe_repair=not getattr(args, "no_qe_repair", False),
+        conversational=_conversational(args, video_vocab),
+        cache_path=cache_path,
+        condense=not getattr(args, "no_condense", False),
+        native_editor=not getattr(args, "no_editor", False),
+        logger=lambda _m: print(_m, flush=True),
+    )
+    _persist_term_pins(outputs, out)
+    written = build_review_bundle(out, en, outputs)
+    print(f"Wrote {len(written)} files to {out}/ (REVIEW.md + per-language VTT+SRT)")
+    return 0
+
+
+def cmd_localize(args) -> int:
+    """EN subtitle -> zh-Hans/ja review-ready cues (translate + glossary + register +
+    reflect + completeness gates + CJK re-segmentation), then a review bundle."""
+    from .cue_builder import strip_sound_tags
+    from .glossary import load as load_glossary
     from .vocab_prep import load_video_vocab
 
+    en = strip_sound_tags(_read_any(args.input, "en"))  # [music]/(applause) never reach translation
+    glossary = load_glossary(args.glossary)
     vocab = load_video_vocab(args.vocab) if args.vocab else {"names": []}
     names = [n.strip() for n in (args.names or "").split(",") if n.strip()]
     if names:
@@ -385,40 +425,16 @@ def cmd_localize(args) -> int:
         transcript = caption_to_transcript(dedup_rolling_cues(en))
         transcript = _correct_transcript(transcript, glossary, _vv, names=_vv.get("names"))
         en = build_en_cues(transcript)
-    cache = None if args.no_cache else str(out / "cache.jsonl")
-    bank_for = _exemplar_bank_for(args, langs)
-    en = _en_review(en, out, args.input, getattr(args, "en_style", None))
-    from . import en_gate
-
-    if not en_gate.require(en, out, args.input):
-        return 3
-    print(
-        f"Localizing {args.input} -> {', '.join(langs)} (glossary={args.glossary}"
-        f"{', vocab=' + args.vocab if args.vocab else ''})…"
-    )
-    _save_description_file(args)
-    outputs = localize_en(
+    return _translate_and_bundle(
+        args,
         en,
-        llm.translator(),
+        out,
         glossary,
-        langs=langs,
-        video_vocab=video_vocab,
-        backcheck=not args.no_backcheck,
-        exemplar_bank_for=bank_for,
-        tm=_translation_memory(args, langs),
-        qe_judge=args.qe_judge,
-        qe_second_judge=_qe_second_judge(args),
-        qe_repair=not getattr(args, "no_qe_repair", False),
-        conversational=_conversational(args, video_vocab),
-        cache_path=cache,
-        condense=not getattr(args, "no_condense", False),
-        native_editor=not getattr(args, "no_editor", False),
-        logger=lambda _m: print(_m, flush=True),
+        video_vocab,
+        title=args.input,
+        en_path=args.input,
+        cache_path=None if args.no_cache else str(out / "cache.jsonl"),
     )
-    _persist_term_pins(outputs, out)
-    written = build_review_bundle(out, en, outputs)
-    print(f"Wrote {len(written)} files to {out}/ (REVIEW.md + per-language VTT+SRT)")
-    return 0
 
 
 def _save_raw(transcript, path) -> None:
@@ -732,15 +748,349 @@ def _conversational(args, video_vocab) -> bool:
     return _auto_conversational(video_vocab)
 
 
+def _run_vocab(args, out: Path) -> dict:
+    """Prefer explicit --vocab; else auto-load a vocab.json the transcribe phase persisted in
+    this out dir (the two-phase backlog flow: transcribe pins renderings, translate reuses).
+    Operator-supplied --names are DNT too."""
+    from .vocab_prep import load_video_vocab
+
+    auto = out / "vocab.json"
+    if args.vocab:
+        video_vocab = load_video_vocab(args.vocab)
+    elif auto.exists():
+        video_vocab = load_video_vocab(auto)
+        print(
+            f"Loaded per-video vocab from {auto} "
+            f"({sum(len(m) for m in video_vocab.get('renderings', {}).values())} renderings)."
+        )
+    else:
+        video_vocab = {"names": []}
+    names = [n.strip() for n in (args.names or "").split(",") if n.strip()]
+    if names:
+        video_vocab.setdefault("names", [])
+        video_vocab["names"] = sorted(set(video_vocab["names"] + names))
+    return video_vocab
+
+
+def _en_from_caption(args, ri, glossary, video_vocab, out: Path):
+    en = _read_any(ri.path, "en")
+    if not args.no_correct:
+        # A human/imported caption gets the SAME proofread as ASR audio: merge rolling-caption
+        # duplicates, then clean-read correct (fix mis-transcribed tech terms/homophones like
+        # 'right once run anywhere'->'write once…', re-join code identifiers, normalize brand/
+        # spelling, drop filler, fix mangled names). Reuses the transcript correction path via a
+        # cue->word adapter so captions and audio share one correction — then re-segments cues.
+        from .cue_builder import caption_to_transcript, dedup_rolling_cues
+
+        deduped = dedup_rolling_cues(en)
+        transcript = caption_to_transcript(deduped)
+        transcript = _correct_transcript(
+            transcript, glossary, video_vocab, names=video_vocab.get("names")
+        )
+        en = _maybe_clean(build_en_cues(transcript), args.clean)
+        print(
+            f"Proofread caption: {len(deduped.cues)} cues after rolling-dedup -> "
+            f"{len(en.cues)} clean-read cues."
+        )
+    _write_any(en, str(out / "en.vtt"))
+    return en
+
+
+def _transcribe_media(args, ri, out: Path, video_vocab):
+    """The primary ASR pass. Returns (transcript, recovery_second): the WhisperX drop-recovery
+    transcript, reused as the auto-caption consult's 2nd ASR (None when it didn't run)."""
+    from .transcribe import WhisperTranscriber
+
+    # Reuse a saved raw transcript so a glossary/vocab change can re-correct
+    # WITHOUT re-running WhisperX; else transcribe and persist it.
+    raw_p = out / "raw.json"
+    recovery_second = None
+    if raw_p.exists() and not args.retranscribe:
+        transcript = _load_raw(raw_p)
+        print(f"Reusing saved raw transcript ({len(transcript.words)} words) — skip ASR")
+        return transcript, None
+    engine = _resolve_engine(args.engine)
+    if engine == "parakeet":
+        # Parakeet (parakeet-mlx): ~20-30x faster than WhisperX-CPU and gets the
+        # technical proper nouns right (React Native/MCP/Claude Code) where Whisper mis-hears
+        # them confidently. Its own errors are cosmetic (segmentation / British
+        # spelling) and are cleaned up deterministically + by the clean-read pass.
+        # No initial_prompt biasing (jargon is handled downstream).
+        from .transcribe import ParakeetTranscriber
+
+        print("Transcribing with Parakeet (parakeet-mlx)…")
+        transcript = ParakeetTranscriber().transcribe(ri.path, language="en")
+        # DROP RECOVERY: Parakeet (RNNT/TDT) silently deletes whole spans on
+        # music/non-speech (NeMo #14430). A cheap WhisperX pass (base) catches
+        # them; we splice ONLY the dropped spans back (surgical — no regression
+        # on what Parakeet got right). Off with --no-recover.
+        if not args.no_recover:
+            from .transcribe_qe import recover_dropped_spans
+
+            print(f"  drop-recovery cross-check: WhisperX {args.recover_model}…")
+            try:
+                second = WhisperTranscriber(
+                    model_size=args.recover_model, device=args.device
+                ).transcribe(ri.path, language="en")
+                transcript, n = recover_dropped_spans(transcript, second)
+                recovery_second = second
+                print(
+                    f"  recovered {n} dropped word(s) Parakeet omitted"
+                    if n
+                    else "  no dropped spans found"
+                )
+            except Exception as e:
+                if "pip install" in str(e):  # WhisperX not installed: say so loudly
+                    print(
+                        "  WARNING: drop recovery is OFF — WhisperX is not installed, so speech "
+                        "Parakeet drops over music/non-speech will be missing. Install it with "
+                        "pip install 'dev-titles[whisper]' (or pass --no-recover to silence this)."
+                    )
+                else:
+                    print(
+                        f"  recovery skipped ({type(e).__name__}: {str(e)[:120]}); Parakeet output kept"
+                    )
+    elif engine == "assemblyai":
+        # AssemblyAI cloud (Universal + diarization) — for public interview content.
+        # A/B showed it isn't more COMPLETE than Parakeet, but transcribes conversational
+        # JARGON right at the source (fewer real errors: 1 vs 4 on a 10-min interview), for
+        # ~$0.26/hr. No drop-recovery needed. Key from $ASSEMBLYAI_API_KEY.
+        from .transcribe import AssemblyAITranscriber
+
+        print("Transcribing with AssemblyAI (cloud; diarized)…")
+        transcript = AssemblyAITranscriber().transcribe(ri.path, language="en")
+    else:
+        tr = WhisperTranscriber(model_size=args.model_size, device=args.device)
+        # Light acoustic prime: WhisperX's initial_prompt is for SHORT priming — a
+        # long term list (48) hung the decode (~6x slower, confirming prior research
+        # that initial_prompt biasing is weak+slow). So bias with a SMALL, high-value
+        # set only (speaker names + a few per-video terms); code identifiers are
+        # handled by the glossary-aware correction + per-video vocab instead.
+        bias = list(
+            dict.fromkeys(
+                list(video_vocab.get("names", [])) + list(video_vocab.get("terms", []))[:6]
+            )
+        )[:8]
+        msg = f"; priming {len(bias)} terms" if bias else ""
+        print(f"Transcribing with WhisperX {args.model_size} ({args.device}){msg}…")
+        transcript = tr.transcribe(ri.path, language="en", custom_vocabulary=bias or None)
+    _save_raw(transcript, raw_p)
+    return transcript, recovery_second
+
+
+def _apply_speaker_names(args, ri, transcript, video_vocab) -> None:
+    """Names as part of ingestion: metadata (video description) is reliable -> auto-apply;
+    transcript self-intros are candidates (ASR may mangle) -> hint. Sets video_vocab['names']."""
+    from .vocab_prep import (
+        extract_name_candidates,
+        harvest_names,
+        load_name_registry,
+        match_registry_names,
+        reconcile_names,
+    )
+
+    meta_names = harvest_names("", ri.metadata)
+    if ri.metadata and getattr(args, "out", None):
+        # keep the written description for the per-video brief (names/roles are authoritative there)
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "description.txt").write_text(ri.metadata, encoding="utf-8")
+    # Channel NAME REGISTRY (glossary/names.yaml): canonical host/guest spellings so a
+    # mangled surname is corrected to the KNOWN spelling, not a per-run guess (the
+    # per-video metadata harvest is transient/unreliable). Match against this video's
+    # description (reliable) + transcript.
+    registry = load_name_registry()
+    reg_names = match_registry_names(
+        (ri.metadata or "") + "\n" + transcript.text,
+        registry,
+        first_name_context=ri.metadata or "",
+    )
+    reliable = sorted(set(video_vocab.get("names", []) + meta_names + reg_names))  # authoritative
+    if reg_names:
+        print(f"Names from channel registry: {', '.join(reg_names)}")
+    if meta_names:
+        print(f"Speaker names from video metadata: {', '.join(meta_names)}")
+    # add self-intro names only if they don't collide with a reliable name
+    # (a colliding one is a mishearing -> stays a correction TARGET, not a name)
+    cand = extract_name_candidates(transcript.text)
+    video_vocab["names"] = reconcile_names(reliable, cand)
+    dropped = [c for c in cand if c not in video_vocab["names"]]
+    if video_vocab["names"]:
+        print(
+            f"Speaker names applied: {', '.join(video_vocab['names'])}"
+            + (f" (ignored likely-mishears {dropped})" if dropped else "")
+        )
+
+
+def _prep_vocab(args, ri, transcript, video_vocab):
+    """Live vocab-prep (no YouTube metadata to lean on): identify the subject FROM the
+    transcript, pull source docs, and build per-video vocab. If it can't identify the
+    subject/docs, REQUEST a docs URL — do NOT silently proceed. Returns the (possibly new)
+    video vocab, or None to halt (--require-prep)."""
+    have_vocab = video_vocab and (video_vocab.get("identifiers") or video_vocab.get("renderings"))
+    if args.no_prep or have_vocab:
+        return video_vocab
+    from . import llm
+    from .vocab_prep import build_video_vocab, curated_forms, http_fetch, identify_subject
+
+    inv = llm.invoke()
+    subj = identify_subject(transcript.text, inv)
+    urls = list(args.docs_url or []) + (subj.get("doc_urls") or [])
+    if not urls and not args.no_search:
+        # No known doc URLs: web-search for the product's docs so brand/product
+        # names get grounded automatically (Google CSE -> DuckDuckGo, best-effort).
+        from .search import web_search
+
+        q = (subj.get("subject") or ri.title or "").strip()
+        found = web_search(f"{q} product documentation", k=4) if q else []
+        if found:
+            urls = found[:2]
+            print(f"  web-search: found {len(urls)} candidate doc(s) for {q!r}")
+    names0 = video_vocab.get("names", []) if video_vocab else []
+    if urls:
+        print(f"Subject: {subj.get('subject', '?')} — pre-ingesting vocab from {len(urls)} doc(s)…")
+        try:
+            vv = build_video_vocab(
+                transcript.text,
+                docs_search=lambda q: "",
+                web_fetch=http_fetch,
+                third_party={f"d{i}": u for i, u in enumerate(urls)},
+                translate=inv,
+                known=curated_forms(args.glossary),
+            )
+            vv["names"] = names0
+            print(
+                f"  pre-ingested {len(vv['identifiers'])} identifiers, "
+                f"{sum(len(m) for m in vv['renderings'].values())} pinned renderings"
+            )
+            return vv
+        except Exception as e:
+            print(f"  doc fetch failed ({type(e).__name__}); continuing on glossary only")
+            return video_vocab
+    if not subj.get("confident") and args.require_prep:
+        print(
+            "NEEDS INPUT (--require-prep): couldn't identify the video's subject or "
+            "find docs to pre-ingest vocab. Halting — re-run with --docs-url "
+            "<feature/library doc URL> or --vocab <file>."
+        )
+        return None
+    # No docs (typical for partner interviews). STILL pin per-video renderings for
+    # CONSISTENCY: propose_renderings gives one canonical per recurring term, and
+    # resolve_entity_renderings looks up brand/product names authoritatively
+    # (Wikipedia). Needs no docs — just the transcript + LLM + web fetch. The
+    # reviewer approves the choices; this stops per-video terms flip-flopping.
+    try:
+        vv = build_video_vocab(
+            transcript.text,
+            docs_search=lambda q: "",
+            web_fetch=http_fetch,
+            translate=inv,
+            known=curated_forms(args.glossary),
+        )
+        vv["names"] = names0
+        print(
+            f"No source docs — pinned {sum(len(m) for m in vv['renderings'].values())} "
+            f"per-video renderings for consistency (reviewer approves)."
+        )
+        return vv
+    except Exception as e:
+        print(f"  rendering-proposal failed ({type(e).__name__}); glossary + names only.")
+        return video_vocab
+
+
+def _en_from_transcript(args, ri, transcript, glossary, video_vocab, out: Path, recovery_second):
+    """Raw ASR transcript -> the corrected EN master (`out/en.vtt`)."""
+    from . import llm
+    from .vocab_prep import save_video_vocab
+
+    # Persist per-video vocab so a later --translate-only run (the two-phase backlog flow)
+    # reuses the pinned renderings/identifiers/names — else they're built at transcribe and
+    # lost before translation. Auto-loaded by _run_vocab when --vocab isn't passed.
+    if video_vocab and (
+        video_vocab.get("renderings") or video_vocab.get("identifiers") or video_vocab.get("names")
+    ):
+        save_video_vocab(out / "vocab.json", video_vocab)
+    # PRE-CLEAN-READ repeated-run recovery: collapse a repeated-token run ('the the the …') —
+    # a genuine speaker stutter or a decoder loop — from the auto-caption BEFORE clean-read,
+    # otherwise clean-read rewrites the run into duplicated real text the cue-level consult
+    # can't detect.
+    if ri.auto_captions:
+        from .transcribe_qe import load_autosub, recover_repeated_runs
+
+        try:
+            transcript, _nh = recover_repeated_runs(transcript, load_autosub(ri.auto_captions))
+            if _nh:
+                print(f"  collapsed {_nh} repeated-token run(s) from auto-caption (pre-clean-read)")
+        except Exception as e:
+            print(f"  repeated-run recovery skipped ({type(e).__name__})")
+    if not args.no_correct:
+        transcript = _correct_transcript(
+            transcript, glossary, video_vocab, names=video_vocab.get("names")
+        )
+        print("Applied glossary-aware clean-read correction (jargon + grammar + filler + names).")
+    en = _maybe_clean(build_en_cues(transcript), args.clean)
+    # PRUNE VOCAB TO THE CORRECTED TEXT: the vocab was harvested from the RAW ASR (above,
+    # before clean-read), so an ASR mishear became a bogus keep-Latin term ('Chief Devilist'
+    # <- 'Chief Evangelist'). Now that clean-read has fixed the captions, drop any term the
+    # corrected EN no longer contains, and re-save — else the garble is forced, untranslated,
+    # into the output.
+    if video_vocab and video_vocab.get("terms"):
+        from .vocab_prep import prune_terms_to_text
+
+        _corrected_text = " ".join(" ".join(c.lines) for c in en.cues)
+        _dropped = prune_terms_to_text(video_vocab, _corrected_text)
+        if _dropped:
+            save_video_vocab(out / "vocab.json", video_vocab)
+            print(
+                f"  pruned {len(_dropped)} ASR-garble term(s) absent from corrected EN: {_dropped}"
+            )
+    # AUTO-CAPTION CONSULT: use YouTube auto-captions + the WhisperX 2nd ASR to auto-
+    # correct garbled/OOV spans the primary got wrong — only where BOTH agree (safe).
+    # Needs the recovery WhisperX pass (default parakeet path) as the 2nd source.
+    if not args.no_qe and ri.auto_captions and recovery_second is not None:
+        from .transcribe_qe import autosub_consult, load_autosub, plausibility_suspects
+
+        try:
+            autosub = load_autosub(ri.auto_captions)
+            en_text = " ".join(" ".join(c.lines) for c in en.cues)
+            flags = [p["phrase"] for p in plausibility_suspects(llm.invoke(), en_text)]
+            fixes = autosub_consult(
+                en, recovery_second, autosub, flags, logger=lambda m: print(m, flush=True)
+            )
+            if fixes:
+                print(
+                    f"Auto-caption consult: auto-corrected {len(fixes)} span(s) "
+                    "(auto-caption + 2nd-ASR agree)"
+                )
+        except Exception as e:
+            print(f"  auto-caption consult skipped ({type(e).__name__})")
+    _write_any(en, str(out / "en.vtt"))
+    print(f"EN master: {len(en.cues)} cues -> {out}/en.vtt")
+    return en
+
+
+def _write_suspect_list(args, ri, raw_transcript, en, out: Path) -> None:
+    """Reference-free QE: a timestamped suspect list for a human ear (no caption needed)."""
+    from . import llm
+    from .transcribe_qe import transcription_suspects, write_suspects_md
+
+    second_asr: "Transcript | None" = None
+    if args.second_pass:
+        print(f"Second ASR pass ({args.second_pass}) for cross-check…")
+        second_asr = _second_transcriber(args.second_pass, args.device).transcribe(
+            ri.path, language="en"
+        )
+    suspects = transcription_suspects(
+        raw_transcript, llm.invoke(), second_transcript=second_asr, corrected=en
+    )
+    write_suspects_md(suspects, out / "suspects.md", ri.title)
+    print(f"Reference-free QE: {len(suspects)} suspects to spot-check -> {out}/suspects.md")
+
+
 def cmd_run(args) -> int:
     """One entry: resolve an input (local file or YouTube URL) then do transcription,
     translation, or both. Media -> both by default; a subtitle input -> translate only."""
-    from . import llm
     from .glossary import load as load_glossary
     from .ingest import resolve_input
-    from .localize import localize_en
-    from .review import build_review_bundle
-    from .transcribe import WhisperTranscriber
 
     ri = resolve_input(args.input, workdir=str(Path(args.out) / "_ingest"))
     out = Path(args.out)
@@ -751,370 +1101,39 @@ def cmd_run(args) -> int:
     ):
         # the source link: listen-list pages (EN_LISTEN.html), held-out exclusion and publishing use it
         (out / "SOURCE-URL.txt").write_text(str(args.input).strip() + "\n", encoding="utf-8")
-    want_tx = not args.translate_only
-    want_tr = not args.transcribe_only
     glossary = load_glossary(args.glossary)
-    from .vocab_prep import load_video_vocab
-
-    # Prefer explicit --vocab; else auto-load a vocab.json the transcribe phase persisted in
-    # this out dir (the two-phase backlog flow: transcribe pins renderings, translate reuses).
-    _auto_vocab = out / "vocab.json"
-    if args.vocab:
-        video_vocab = load_video_vocab(args.vocab)
-    elif _auto_vocab.exists():
-        video_vocab = load_video_vocab(_auto_vocab)
-        print(
-            f"Loaded per-video vocab from {_auto_vocab} "
-            f"({sum(len(m) for m in video_vocab.get('renderings', {}).values())} renderings)."
-        )
-    else:
-        video_vocab = {"names": []}
-    names = [n.strip() for n in (args.names or "").split(",") if n.strip()]
-    if names:  # operator-supplied names are DNT too
-        video_vocab.setdefault("names", [])
-        video_vocab["names"] = sorted(set(video_vocab["names"] + names))
+    video_vocab = _run_vocab(args, out)
     print(f"Resolved {args.input} -> {ri.kind} ({ri.title or ri.path})")
 
     # 1) EN master: from a subtitle input directly, else transcribe (+ clean-read correct) the media.
     if ri.kind == "subtitle":
-        en = _read_any(ri.path, "en")
-        if not args.no_correct:
-            # A human/imported caption gets the SAME proofread as ASR audio: merge rolling-caption
-            # duplicates, then clean-read correct (fix mis-transcribed tech terms/homophones like
-            # 'right once run anywhere'->'write once…', re-join code identifiers, normalize brand/
-            # spelling, drop filler, fix mangled names). Reuses the transcript correction path via a
-            # cue->word adapter so captions and audio share one correction — then re-segments cues.
-            from .cue_builder import caption_to_transcript, dedup_rolling_cues
-
-            deduped = dedup_rolling_cues(en)
-            transcript = caption_to_transcript(deduped)
-            transcript = _correct_transcript(
-                transcript, glossary, video_vocab, names=video_vocab.get("names")
-            )
-            en = _maybe_clean(build_en_cues(transcript), args.clean)
-            print(
-                f"Proofread caption: {len(deduped.cues)} cues after rolling-dedup -> "
-                f"{len(en.cues)} clean-read cues."
-            )
-        _write_any(en, str(out / "en.vtt"))
+        en = _en_from_caption(args, ri, glossary, video_vocab, out)
     else:
-        recovery_second = None  # WhisperX drop-recovery pass, reused as the auto-consult 2nd ASR
-        if not want_tx and want_tr:
+        if args.translate_only and not args.transcribe_only:
             print("Media input needs transcription before translation; transcribing.")
-            want_tx = True
-        # Reuse a saved raw transcript so a glossary/vocab change can re-correct
-        # WITHOUT re-running WhisperX; else transcribe and persist it.
-        raw_p = out / "raw.json"
-        if raw_p.exists() and not args.retranscribe:
-            transcript = _load_raw(raw_p)
-            print(f"Reusing saved raw transcript ({len(transcript.words)} words) — skip ASR")
-        elif (engine := _resolve_engine(args.engine)) == "parakeet":
-            # Parakeet (parakeet-mlx): ~20-30x faster than WhisperX-CPU and gets the
-            # technical proper nouns right (React Native/MCP/Claude Code) where Whisper mis-hears
-            # them confidently. Its own errors are cosmetic (segmentation / British
-            # spelling) and are cleaned up deterministically + by the clean-read pass.
-            # No initial_prompt biasing (jargon is handled downstream).
-            from .transcribe import ParakeetTranscriber
-
-            print("Transcribing with Parakeet (parakeet-mlx)…")
-            transcript = ParakeetTranscriber().transcribe(ri.path, language="en")
-            # DROP RECOVERY: Parakeet (RNNT/TDT) silently deletes whole spans on
-            # music/non-speech (NeMo #14430). A cheap WhisperX pass (base) catches
-            # them; we splice ONLY the dropped spans back (surgical — no regression
-            # on what Parakeet got right). Off with --no-recover.
-            if not args.no_recover:
-                from .transcribe_qe import recover_dropped_spans
-
-                print(f"  drop-recovery cross-check: WhisperX {args.recover_model}…")
-                try:
-                    second = WhisperTranscriber(
-                        model_size=args.recover_model, device=args.device
-                    ).transcribe(ri.path, language="en")
-                    transcript, n = recover_dropped_spans(transcript, second)
-                    recovery_second = second  # reuse as the auto-caption consult's 2nd ASR
-                    print(
-                        f"  recovered {n} dropped word(s) Parakeet omitted"
-                        if n
-                        else "  no dropped spans found"
-                    )
-                except Exception as e:
-                    if "pip install" in str(e):  # WhisperX not installed: say so loudly
-                        print(
-                            "  WARNING: drop recovery is OFF — WhisperX is not installed, so speech "
-                            "Parakeet drops over music/non-speech will be missing. Install it with "
-                            "pip install 'dev-titles[whisper]' (or pass --no-recover to silence this)."
-                        )
-                    else:
-                        print(
-                            f"  recovery skipped ({type(e).__name__}: {str(e)[:120]}); Parakeet output kept"
-                        )
-            _save_raw(transcript, raw_p)
-        elif engine == "assemblyai":
-            # AssemblyAI cloud (Universal + diarization) — for public interview content.
-            # A/B showed it isn't more COMPLETE than Parakeet, but transcribes conversational
-            # JARGON right at the source (fewer real errors: 1 vs 4 on a 10-min interview), for
-            # ~$0.26/hr. No drop-recovery needed. Key from $ASSEMBLYAI_API_KEY.
-            from .transcribe import AssemblyAITranscriber
-
-            print("Transcribing with AssemblyAI (cloud; diarized)…")
-            transcript = AssemblyAITranscriber().transcribe(ri.path, language="en")
-            _save_raw(transcript, raw_p)
-        else:
-            tr = WhisperTranscriber(model_size=args.model_size, device=args.device)
-            # Light acoustic prime: WhisperX's initial_prompt is for SHORT priming — a
-            # long term list (48) hung the decode (~6x slower, confirming prior research
-            # that initial_prompt biasing is weak+slow). So bias with a SMALL, high-value
-            # set only (speaker names + a few per-video terms); code identifiers are
-            # handled by the glossary-aware correction + per-video vocab instead.
-            bias = list(
-                dict.fromkeys(
-                    list(video_vocab.get("names", [])) + list(video_vocab.get("terms", []))[:6]
-                )
-            )[:8]
-            msg = f"; priming {len(bias)} terms" if bias else ""
-            print(f"Transcribing with WhisperX {args.model_size} ({args.device}){msg}…")
-            transcript = tr.transcribe(ri.path, language="en", custom_vocabulary=bias or None)
-            _save_raw(transcript, raw_p)
-        # Names as part of ingestion: metadata (video description) is reliable ->
-        # auto-apply; transcript self-intros are candidates (ASR may mangle) -> hint.
-        from .vocab_prep import (
-            extract_name_candidates,
-            harvest_names,
-            load_name_registry,
-            match_registry_names,
-            reconcile_names,
-        )
-
-        meta_names = harvest_names("", ri.metadata)
-        if ri.metadata and getattr(args, "out", None):
-            # keep the written description for the per-video brief (names/roles are authoritative there)
-            Path(args.out).mkdir(parents=True, exist_ok=True)
-            (Path(args.out) / "description.txt").write_text(ri.metadata, encoding="utf-8")
-        # Channel NAME REGISTRY (glossary/names.yaml): canonical host/guest spellings so a
-        # mangled surname is corrected to the KNOWN spelling, not a per-run guess (the
-        # per-video metadata harvest is transient/unreliable). Match against this video's
-        # description (reliable) + transcript.
-        registry = load_name_registry()
-        reg_names = match_registry_names(
-            (ri.metadata or "") + "\n" + transcript.text,
-            registry,
-            first_name_context=ri.metadata or "",
-        )
-        reliable = sorted(
-            set(video_vocab.get("names", []) + meta_names + reg_names)
-        )  # authoritative
-        if reg_names:
-            print(f"Names from channel registry: {', '.join(reg_names)}")
-        if meta_names:
-            print(f"Speaker names from video metadata: {', '.join(meta_names)}")
-        # add self-intro names only if they don't collide with a reliable name
-        # (a colliding one is a mishearing -> stays a correction TARGET, not a name)
-        cand = extract_name_candidates(transcript.text)
-        video_vocab["names"] = reconcile_names(reliable, cand)
-        dropped = [c for c in cand if c not in video_vocab["names"]]
-        if video_vocab["names"]:
-            print(
-                f"Speaker names applied: {', '.join(video_vocab['names'])}"
-                + (f" (ignored likely-mishears {dropped})" if dropped else "")
-            )
-        # Live vocab-prep (no YouTube metadata to lean on): identify the subject FROM
-        # the transcript, pull source docs, and build per-video vocab. If it can't
-        # identify the subject/docs, REQUEST a docs URL — do NOT silently proceed.
-        _have_vocab = video_vocab and (
-            video_vocab.get("identifiers") or video_vocab.get("renderings")
-        )
-        if not args.no_prep and not _have_vocab:
-            from .vocab_prep import build_video_vocab, curated_forms, http_fetch, identify_subject
-
-            inv = llm.invoke()
-            subj = identify_subject(transcript.text, inv)
-            urls = list(args.docs_url or []) + (subj.get("doc_urls") or [])
-            if not urls and not args.no_search:
-                # No known doc URLs: web-search for the product's docs so brand/product
-                # names get grounded automatically (Google CSE -> DuckDuckGo, best-effort).
-                from .search import web_search
-
-                q = (subj.get("subject") or ri.title or "").strip()
-                found = web_search(f"{q} product documentation", k=4) if q else []
-                if found:
-                    urls = found[:2]
-                    print(f"  web-search: found {len(urls)} candidate doc(s) for {q!r}")
-            if urls:
-                print(
-                    f"Subject: {subj.get('subject', '?')} — pre-ingesting vocab from {len(urls)} doc(s)…"
-                )
-                names0 = video_vocab.get("names", []) if video_vocab else []
-                try:
-                    vv = build_video_vocab(
-                        transcript.text,
-                        docs_search=lambda q: "",
-                        web_fetch=http_fetch,
-                        third_party={f"d{i}": u for i, u in enumerate(urls)},
-                        translate=inv,
-                        known=curated_forms(args.glossary),
-                    )
-                    vv["names"] = names0
-                    video_vocab = vv
-                    print(
-                        f"  pre-ingested {len(vv['identifiers'])} identifiers, "
-                        f"{sum(len(m) for m in vv['renderings'].values())} pinned renderings"
-                    )
-                except Exception as e:
-                    print(f"  doc fetch failed ({type(e).__name__}); continuing on glossary only")
-            else:
-                if not subj.get("confident") and args.require_prep:
-                    print(
-                        "NEEDS INPUT (--require-prep): couldn't identify the video's subject or "
-                        "find docs to pre-ingest vocab. Halting — re-run with --docs-url "
-                        "<feature/library doc URL> or --vocab <file>."
-                    )
-                    return 2
-                # No docs (typical for partner interviews). STILL pin per-video renderings for
-                # CONSISTENCY: propose_renderings gives one canonical per recurring term, and
-                # resolve_entity_renderings looks up brand/product names authoritatively
-                # (Wikipedia). Needs no docs — just the transcript + LLM + web fetch. The
-                # reviewer approves the choices; this stops per-video terms flip-flopping.
-                names0 = video_vocab.get("names", []) if video_vocab else []
-                try:
-                    vv = build_video_vocab(
-                        transcript.text,
-                        docs_search=lambda q: "",
-                        web_fetch=http_fetch,
-                        translate=inv,
-                        known=curated_forms(args.glossary),
-                    )
-                    vv["names"] = names0
-                    video_vocab = vv
-                    print(
-                        f"No source docs — pinned {sum(len(m) for m in vv['renderings'].values())} "
-                        f"per-video renderings for consistency (reviewer approves)."
-                    )
-                except Exception as e:
-                    print(
-                        f"  rendering-proposal failed ({type(e).__name__}); glossary + names only."
-                    )
-        # Persist per-video vocab so a later --translate-only run (the two-phase backlog flow)
-        # reuses the pinned renderings/identifiers/names — else they're built at transcribe and
-        # lost before translation. Auto-loaded below when --vocab isn't passed.
-        if video_vocab and (
-            video_vocab.get("renderings")
-            or video_vocab.get("identifiers")
-            or video_vocab.get("names")
-        ):
-            from .vocab_prep import save_video_vocab
-
-            save_video_vocab(out / "vocab.json", video_vocab)
-        raw_transcript = transcript  # keep pre-correction (has confidences) for QE
-        # PRE-CLEAN-READ repeated-run recovery: collapse a repeated-token run ('the the the …') —
-        # a genuine speaker stutter or a decoder loop — from the auto-caption BEFORE clean-read,
-        # otherwise clean-read rewrites the run into duplicated real text the cue-level consult
-        # can't detect.
-        if ri.auto_captions:
-            from .transcribe_qe import load_autosub, recover_repeated_runs
-
-            try:
-                transcript, _nh = recover_repeated_runs(transcript, load_autosub(ri.auto_captions))
-                if _nh:
-                    print(
-                        f"  collapsed {_nh} repeated-token run(s) from auto-caption (pre-clean-read)"
-                    )
-            except Exception as e:
-                print(f"  repeated-run recovery skipped ({type(e).__name__})")
-        if not args.no_correct:
-            transcript = _correct_transcript(
-                transcript, glossary, video_vocab, names=video_vocab.get("names")
-            )
-            print(
-                "Applied glossary-aware clean-read correction (jargon + grammar + filler + names)."
-            )
-        en = _maybe_clean(build_en_cues(transcript), args.clean)
-        # PRUNE VOCAB TO THE CORRECTED TEXT: the vocab was harvested from the RAW ASR (above,
-        # before clean-read), so an ASR mishear became a bogus keep-Latin term ('Chief Devilist'
-        # <- 'Chief Evangelist'). Now that clean-read has fixed the captions, drop any term the
-        # corrected EN no longer contains, and re-save — else the garble is forced, untranslated,
-        # into the output.
-        if video_vocab and video_vocab.get("terms"):
-            from .vocab_prep import prune_terms_to_text, save_video_vocab
-
-            _corrected_text = " ".join(" ".join(c.lines) for c in en.cues)
-            _dropped = prune_terms_to_text(video_vocab, _corrected_text)
-            if _dropped:
-                save_video_vocab(out / "vocab.json", video_vocab)
-                print(
-                    f"  pruned {len(_dropped)} ASR-garble term(s) absent from corrected EN: {_dropped}"
-                )
-        # AUTO-CAPTION CONSULT: use YouTube auto-captions + the WhisperX 2nd ASR to auto-
-        # correct garbled/OOV spans the primary got wrong — only where BOTH agree (safe).
-        # Needs the recovery WhisperX pass (default parakeet path) as the 2nd source.
-        if not args.no_qe and ri.auto_captions and recovery_second is not None:
-            from .transcribe_qe import autosub_consult, load_autosub, plausibility_suspects
-
-            try:
-                autosub = load_autosub(ri.auto_captions)
-                en_text = " ".join(" ".join(c.lines) for c in en.cues)
-                flags = [p["phrase"] for p in plausibility_suspects(llm.invoke(), en_text)]
-                fixes = autosub_consult(
-                    en, recovery_second, autosub, flags, logger=lambda m: print(m, flush=True)
-                )
-                if fixes:
-                    print(
-                        f"Auto-caption consult: auto-corrected {len(fixes)} span(s) "
-                        "(auto-caption + 2nd-ASR agree)"
-                    )
-            except Exception as e:
-                print(f"  auto-caption consult skipped ({type(e).__name__})")
-        _write_any(en, str(out / "en.vtt"))
-        print(f"EN master: {len(en.cues)} cues -> {out}/en.vtt")
-        # Reference-free QE: a timestamped suspect list for a human ear (no caption needed).
+        transcript, recovery_second = _transcribe_media(args, ri, out, video_vocab)
+        _apply_speaker_names(args, ri, transcript, video_vocab)
+        video_vocab = _prep_vocab(args, ri, transcript, video_vocab)
+        if video_vocab is None:
+            return 2
+        en = _en_from_transcript(args, ri, transcript, glossary, video_vocab, out, recovery_second)
         if not args.no_qe:
-            from .transcribe_qe import transcription_suspects, write_suspects_md
-
-            second_asr: "Transcript | None" = None
-            if args.second_pass:
-                print(f"Second ASR pass ({args.second_pass}) for cross-check…")
-                second_asr = _second_transcriber(args.second_pass, args.device).transcribe(
-                    ri.path, language="en"
-                )
-            suspects = transcription_suspects(
-                raw_transcript, llm.invoke(), second_transcript=second_asr, corrected=en
-            )
-            write_suspects_md(suspects, out / "suspects.md", ri.title)
-            print(f"Reference-free QE: {len(suspects)} suspects to spot-check -> {out}/suspects.md")
-    if not want_tr:
+            # the pre-correction transcript (has confidences) is what QE scores
+            _write_suspect_list(args, ri, transcript, en, out)
+    if args.transcribe_only:
         return 0
 
     # 2) Translate the EN master.
-    langs = args.lang or ["zh-Hans", "ja"]
-    bank_for = _exemplar_bank_for(args, langs)
-    en = _en_review(en, out, ri.title or ri.path, getattr(args, "en_style", None))
-    from . import en_gate
-
-    if not en_gate.require(en, out, str(out / "en.vtt")):
-        return 3
-    print(f"Localizing -> {', '.join(langs)}…")
-    _save_description_file(args)
-    outputs = localize_en(
+    return _translate_and_bundle(
+        args,
         en,
-        llm.translator(),
+        out,
         glossary,
-        langs=langs,
-        video_vocab=video_vocab,
-        backcheck=not args.no_backcheck,
-        exemplar_bank_for=bank_for,
-        tm=_translation_memory(args, langs),
-        qe_judge=args.qe_judge,
-        qe_second_judge=_qe_second_judge(args),
-        qe_repair=not getattr(args, "no_qe_repair", False),
-        conversational=_conversational(args, video_vocab),
+        video_vocab,
+        title=ri.title or ri.path,
+        en_path=str(out / "en.vtt"),
         cache_path=str(out / "cache.jsonl"),
-        condense=not getattr(args, "no_condense", False),
-        native_editor=not getattr(args, "no_editor", False),
-        logger=lambda _m: print(_m, flush=True),
     )
-    _persist_term_pins(outputs, out)
-    written = build_review_bundle(out, en, outputs)
-    print(f"Wrote {len(written)} files to {out}/")
-    return 0
 
 
 def cmd_approve_en(args) -> int:
@@ -1158,21 +1177,7 @@ def cmd_promote_terms(args) -> int:
     return 0 if promoted is not None else 1
 
 
-def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="dev_titles")
-    p.add_argument(
-        "--llm",
-        choices=("claude", "codex", "openai"),
-        default=None,
-        help="primary model backend: claude (local Claude Code CLI, default), codex (local OpenAI "
-        "Codex CLI, e.g. signed in with ChatGPT), openai (any OpenAI-compatible API via "
-        "$OPENAI_API_KEY / $OPENAI_BASE_URL). Also $DEV_TITLES_LLM.",
-    )
-    p.add_argument(
-        "--llm-model", default=None, help="model id for the --llm backend (required for openai)"
-    )
-    sub = p.add_subparsers(dest="cmd", required=True)
-
+def _add_simple_parsers(sub) -> None:
     v = sub.add_parser("validate", help="check a subtitle file against per-language rules")
     v.add_argument("input")
     v.add_argument("--lang", required=True)
@@ -1221,80 +1226,108 @@ def main(argv=None) -> int:
     pl.add_argument("--gemba", action="store_true", help="QE via GEMBA-MQM (CLI judge)")
     pl.set_defaults(func=cmd_pilot)
 
-    rn = sub.add_parser(
-        "run", help="one entry: input (file/YouTube URL) -> transcribe and/or translate"
-    )
-    rn.add_argument("input", help="local media/subtitle file OR a YouTube URL")
-    rn.add_argument(
+
+def _add_translate_options(p) -> None:
+    """The translation options `run` and `localize` share."""
+    p.add_argument(
         "--en-style",
         choices=["scripted", "unscripted"],
         help="override the scripted/unscripted call that decides whether the EN gets a clean-read "
         "(unscripted: stutters/filler removed, deletions only; scripted e.g. tutorials: left as written)",
     )
-    rn.add_argument("--out", required=True, help="output directory")
-    rn.add_argument(
+    p.add_argument(
         "--lang",
         action="append",
         default=None,
         help="target language (repeatable; default zh-Hans + ja)",
     )
-    rn.add_argument("--transcribe-only", action="store_true", help="EN transcription only")
-    rn.add_argument(
-        "--translate-only", action="store_true", help="translation only (input is EN subs)"
-    )
-    rn.add_argument("--glossary", default="glossary/glossary.yaml")
-    rn.add_argument("--vocab", default=None, help="per-video vocab JSON (vocab-prep output)")
-    rn.add_argument(
+    p.add_argument("--glossary", default="glossary/glossary.yaml")
+    p.add_argument("--vocab", default=None, help="per-video vocab JSON (vocab-prep output)")
+    p.add_argument(
         "--names",
         default=None,
         help="comma-separated speaker/proper names (DNT; ASR mishears corrected to these)",
     )
-    rn.add_argument("--no-backcheck", action="store_true", help="skip the coverage edit-fix gate")
-    rn.add_argument(
+    p.add_argument(
+        "--no-backcheck",
+        action="store_true",
+        help="skip the source-anchored coverage edit-fix gate",
+    )
+    p.add_argument(
         "--exemplars",
         default="input/channel",
         help="human parallel-subtitle corpus dir to mine few-shot exemplars from",
     )
-    rn.add_argument(
+    p.add_argument(
         "--no-exemplars",
         action="store_true",
         help="disable few-shot exemplars (prose-style directives only)",
     )
-    rn.add_argument(
+    p.add_argument(
         "--tm",
         default="tm/tm.jsonl",
         help="translation-memory store (exact-match reuse + series exemplars; "
         "seeded from the human corpus if absent)",
     )
-    rn.add_argument("--no-tm", action="store_true", help="disable the translation memory")
-    rn.add_argument(
+    p.add_argument("--no-tm", action="store_true", help="disable the translation memory")
+    p.add_argument(
         "--qe-judge",
         action="store_true",
         dest="qe_judge",
         help="add the LLM MQM two-judge panel (primary model + a different-family judge if installed) "
         "scored via calibrated DQF; deterministic QE runs regardless",
     )
-    rn.add_argument(
+    p.add_argument(
         "--single-judge",
         action="store_true",
         dest="single_judge",
         help="force single-model QE (disable the different-family 2nd judge) — use when "
         "codex/Bedrock is unavailable",
     )
-    rn.add_argument(
+    p.add_argument(
         "--no-qe-repair",
         action="store_true",
         help="skip QE-guided auto-repair of judge-flagged majors (accept-only-if-better)",
     )
-    rn.add_argument(
+    p.add_argument(
         "--conversational",
         action="store_true",
         help="casual/interview content: zh uses 你 (not formal 您); docs default keeps 您",
     )
-    rn.add_argument(
+    p.add_argument(
         "--no-conversational",
         action="store_true",
         help="force formal register (zh 您) even if auto-detected as an interview",
+    )
+    p.add_argument(
+        "--no-condense",
+        action="store_true",
+        help="ja: skip the condensation pass (on by default: tightens translations like a subtitle "
+        "editor before QE, guarded; ~12%% shorter)",
+    )
+    p.add_argument(
+        "--no-editor",
+        action="store_true",
+        help="skip the native-editor pass (on by default: a native subtitle editor flags lines a "
+        "viewer would notice and rewrites them; accepted only if a second judge agrees)",
+    )
+    p.add_argument(
+        "--description-file",
+        help="video description text (names, roles, topic) for the per-video brief — for videos "
+        "not on YouTube yet; published videos fetch it automatically",
+    )
+
+
+def _add_run_parser(sub) -> None:
+    rn = sub.add_parser(
+        "run", help="one entry: input (file/YouTube URL) -> transcribe and/or translate"
+    )
+    rn.add_argument("input", help="local media/subtitle file OR a YouTube URL")
+    rn.add_argument("--out", required=True, help="output directory")
+    _add_translate_options(rn)
+    rn.add_argument("--transcribe-only", action="store_true", help="EN transcription only")
+    rn.add_argument(
+        "--translate-only", action="store_true", help="translation only (input is EN subs)"
     )
     rn.add_argument("--clean", action="store_true", help="LLM cleanup pass on ASR cues")
     rn.add_argument(
@@ -1364,117 +1397,21 @@ def main(argv=None) -> int:
         dest="recover_model",
         help="WhisperX model for drop recovery (default base; small = better/slower)",
     )
-    rn.add_argument(
-        "--no-condense",
-        action="store_true",
-        help="ja: skip the condensation pass (on by default: tightens translations like a subtitle "
-        "editor before QE, guarded; ~12%% shorter)",
-    )
-    rn.add_argument(
-        "--no-editor",
-        action="store_true",
-        help="skip the native-editor pass (on by default: a native subtitle editor flags lines a "
-        "viewer would notice and rewrites them; accepted only if a second judge agrees)",
-    )
-    rn.add_argument(
-        "--description-file",
-        help="video description text (names, roles, topic) for the per-video brief — for videos "
-        "not on YouTube yet; published videos fetch it automatically",
-    )
     rn.add_argument("--model-size", default="large-v3", dest="model_size")
     rn.add_argument("--device", default="cpu", help="cpu | cuda")
     rn.set_defaults(func=cmd_run)
 
+
+def _add_localize_parser(sub) -> None:
     lo = sub.add_parser("localize", help="EN subtitle -> zh-Hans/ja review-ready cues + bundle")
-    lo.add_argument(
-        "--en-style",
-        choices=["scripted", "unscripted"],
-        help="override the scripted/unscripted call that decides whether the EN gets a clean-read "
-        "(unscripted: stutters/filler removed, deletions only; scripted e.g. tutorials: left as written)",
-    )
     lo.add_argument("input", help="EN master subtitle (.vtt/.srt/.sbv)")
     lo.add_argument("--out", required=True, help="output bundle directory")
-    lo.add_argument(
-        "--lang",
-        action="append",
-        default=None,
-        help="target language (repeatable; default zh-Hans + ja)",
-    )
-    lo.add_argument("--glossary", default="glossary/glossary.yaml")
-    lo.add_argument("--vocab", default=None, help="per-video vocab JSON (vocab-prep output)")
-    lo.add_argument(
-        "--names", default=None, help="comma-separated speaker/proper names (kept Latin)"
-    )
-    lo.add_argument(
-        "--no-backcheck",
-        action="store_true",
-        help="skip the source-anchored coverage edit-fix gate",
-    )
-    lo.add_argument(
-        "--exemplars",
-        default="input/channel",
-        help="human parallel-subtitle corpus dir to mine few-shot exemplars from",
-    )
-    lo.add_argument(
-        "--no-exemplars",
-        action="store_true",
-        help="disable few-shot exemplars (prose-style directives only)",
-    )
-    lo.add_argument(
-        "--tm",
-        default="tm/tm.jsonl",
-        help="translation-memory store (exact-match reuse + series exemplars)",
-    )
-    lo.add_argument("--no-tm", action="store_true", help="disable the translation memory")
-    lo.add_argument(
-        "--qe-judge",
-        action="store_true",
-        dest="qe_judge",
-        help="add the LLM MQM two-judge panel (primary model + a different-family judge if installed) "
-        "scored via calibrated DQF; deterministic QE runs regardless",
-    )
-    lo.add_argument(
-        "--single-judge",
-        action="store_true",
-        dest="single_judge",
-        help="force single-model QE (disable the different-family 2nd judge) — use when "
-        "codex/Bedrock is unavailable",
-    )
-    lo.add_argument(
-        "--no-qe-repair",
-        action="store_true",
-        help="skip QE-guided auto-repair of judge-flagged majors (accept-only-if-better)",
-    )
-    lo.add_argument(
-        "--conversational",
-        action="store_true",
-        help="casual/interview content: zh uses 你 (not formal 您); docs default keeps 您",
-    )
-    lo.add_argument(
-        "--no-conversational",
-        action="store_true",
-        help="force formal register (zh 您) even if auto-detected as an interview",
-    )
-    lo.add_argument(
-        "--no-condense",
-        action="store_true",
-        help="ja: skip the condensation pass (on by default: tightens translations like a subtitle "
-        "editor before QE, guarded; ~12%% shorter)",
-    )
-    lo.add_argument(
-        "--no-editor",
-        action="store_true",
-        help="skip the native-editor pass (on by default: a native subtitle editor flags lines a "
-        "viewer would notice and rewrites them; accepted only if a second judge agrees)",
-    )
-    lo.add_argument(
-        "--description-file",
-        help="video description text (names, roles, topic) for the per-video brief — for videos "
-        "not on YouTube yet; published videos fetch it automatically",
-    )
+    _add_translate_options(lo)
     lo.add_argument("--no-cache", action="store_true", help="don't write a resumable cache")
     lo.set_defaults(func=cmd_localize)
 
+
+def _add_review_parsers(sub) -> None:
     au = sub.add_parser(
         "audit", help="audit OURS vs a reference subtitle -> verdict-labeled review sheet"
     )
@@ -1515,6 +1452,17 @@ def main(argv=None) -> int:
     )
     rs.set_defaults(func=cmd_rescore)
 
+    ap = sub.add_parser(
+        "approve-en",
+        help="sign off the English script (after resolving every held EN-review line) so it can be translated",
+    )
+    ap.add_argument("out", help="the video's output dir (holds en_review.json)")
+    ap.add_argument("--en", help="the EN file that will be translated (default <out>/en.vtt)")
+    ap.add_argument("--note", default="", help="what was resolved, for the record")
+    ap.set_defaults(func=cmd_approve_en)
+
+
+def _add_glossary_parsers(sub) -> None:
     tm = sub.add_parser("tm", help="manage the translation memory (seed/add/export/stats)")
     tm.add_argument("action", choices=["seed", "add", "export", "stats", "import-tmx"])
     tm.add_argument("--tm", default="tm/tm.jsonl", help="TM store path (JSONL)")
@@ -1560,16 +1508,31 @@ def main(argv=None) -> int:
     )
     pt.set_defaults(func=cmd_promote_terms)
 
-    ap = sub.add_parser(
-        "approve-en",
-        help="sign off the English script (after resolving every held EN-review line) so it can be translated",
-    )
-    ap.add_argument("out", help="the video's output dir (holds en_review.json)")
-    ap.add_argument("--en", help="the EN file that will be translated (default <out>/en.vtt)")
-    ap.add_argument("--note", default="", help="what was resolved, for the record")
-    ap.set_defaults(func=cmd_approve_en)
 
-    args = p.parse_args(argv)
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="dev_titles")
+    p.add_argument(
+        "--llm",
+        choices=("claude", "codex", "openai"),
+        default=None,
+        help="primary model backend: claude (local Claude Code CLI, default), codex (local OpenAI "
+        "Codex CLI, e.g. signed in with ChatGPT), openai (any OpenAI-compatible API via "
+        "$OPENAI_API_KEY / $OPENAI_BASE_URL). Also $DEV_TITLES_LLM.",
+    )
+    p.add_argument(
+        "--llm-model", default=None, help="model id for the --llm backend (required for openai)"
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+    _add_simple_parsers(sub)
+    _add_run_parser(sub)
+    _add_localize_parser(sub)
+    _add_review_parsers(sub)
+    _add_glossary_parsers(sub)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
     from . import llm
 
     llm.configure(args.llm, args.llm_model)
