@@ -53,3 +53,39 @@ def sync_report(
         "far_share": round(far, 2),
         "drifted": med > max_median or far > max_far_share,
     }
+
+
+def local_desync(
+    target_cues, en_cues, *, tol: float = 2.0, unique_window: float = 30.0
+) -> list[dict]:
+    """Individual target cues out of step with the EN: the cue's time span is more than `tol` s
+    away from the span of the EN cue holding the same Latin anchor. Only anchors that occur ONCE in
+    the EN within ±unique_window s count (a repeated name can't say which occurrence is meant).
+    The aggregate sync_report misses a local slip (an anchor 3 s
+    off while the track's median was 0.9 s)."""
+    out = []
+    for c in target_cues:
+        mid = (c.start + c.end) / 2
+        for tok in sorted(set(_ANCHOR.findall(" ".join(c.lines)))):
+            pat = re.compile(r"\b" + re.escape(tok) + r"\b", re.I)
+            near = [
+                e
+                for e in en_cues
+                if pat.search(" ".join(e.lines))
+                and abs((e.start + e.end) / 2 - mid) <= unique_window
+            ]
+            if len(near) != 1:
+                continue
+            e = near[0]
+            gap = max(e.start - c.end, c.start - e.end, 0.0)
+            if gap > tol:
+                out.append(
+                    {
+                        "start": round(c.start, 2),
+                        "anchor": tok,
+                        "gap": round(gap, 2),
+                        "en_start": round(e.start, 2),
+                        "text": " ".join(c.lines)[:40],
+                    }
+                )
+    return out

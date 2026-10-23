@@ -347,6 +347,77 @@ def _looks_like_raw_caption(en) -> bool:
     return fillers >= 3 or overlong / len(lines) > 0.2
 
 
+def _speech_align(en, out: Path):
+    """EN vs the SPEECH (validate/speech_sync.py). Speech word timings come from this video's ASR
+    (out/raw.json), its YouTube auto-captions (out/_ingest), or — via SOURCE-URL.txt — downloaded
+    once into out/_speech. When EN cues are > 2 s off, re-time them to the speech (text unchanged;
+    kept only if it validates and has fewer errors), then record what's still off in
+    speech_sync.json, which the EN gate turns into held items. Returns the (possibly re-timed) EN.
+    """
+    from . import en_gate
+    from .formats.vtt import write_vtt
+    from .validate import validate_subtitle
+    from .validate.speech_sync import (
+        load_speech_words,
+        retime_to_speech,
+        speech_sync_report,
+        speech_words_for,
+    )
+
+    speech: list = []
+    raw = out / "raw.json"
+    autos = sorted((out / "_ingest").glob("*.en*.vtt")) if (out / "_ingest").is_dir() else []
+    try:
+        if raw.exists():
+            speech = load_speech_words(raw)
+        for a in autos:
+            if not speech:
+                w = load_speech_words(a)
+                speech = w if len(w) > 50 else []  # a human caption has no word timings
+        if not speech and (out / "SOURCE-URL.txt").exists():
+            import re as _re
+
+            m = _re.search(
+                r"v=([A-Za-z0-9_-]{11})|youtu\.be/([A-Za-z0-9_-]{11})",
+                (out / "SOURCE-URL.txt").read_text(),
+            )
+            if m:
+                speech = speech_words_for(m.group(1) or m.group(2), out / "_speech")
+    except Exception as e:
+        print(f"EN speech-sync check skipped ({type(e).__name__})")
+        speech = []
+    if not speech:
+        print("EN speech-sync check: no word-timed speech for this video — not checked")
+        return en
+    rep = speech_sync_report(en, speech)
+    errs = sum(o["severity"] == "error" for o in rep["off"])
+    if errs:
+        new, moved = retime_to_speech(en, speech)
+        rep2 = speech_sync_report(new, speech)
+        errs2 = sum(o["severity"] == "error" for o in rep2["off"])
+        clean = not [
+            v
+            for v in validate_subtitle(new)
+            if v.severity == "error" and v.rule != "duplicate_text"
+        ]
+        if clean and errs2 < errs:
+            p = out / "en.vtt"
+            if p.exists() and not (out / "en.orig.vtt").exists():
+                (out / "en.orig.vtt").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+            p.write_text(write_vtt(new), encoding="utf-8")
+            print(f"EN re-timed to the speech: {moved} cue(s); sync errors {errs} -> {errs2}")
+            en, rep, errs = new, rep2, errs2
+    (out / en_gate.SPEECH_SYNC).write_text(
+        json.dumps({"hash": en_gate.en_hash(en), **rep}, ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+    print(
+        f"EN speech-sync: median {rep['median']:+.2f} s over {rep['checked']} cues; "
+        f"{errs} cue(s) > 2 s late"
+    )
+    return en
+
+
 def _translate_and_bundle(
     args, en, out: Path, glossary, video_vocab, *, title: str, en_path: str, cache_path
 ) -> int:
@@ -359,6 +430,7 @@ def _translate_and_bundle(
     langs = args.lang or ["zh-Hans", "ja"]
     bank_for = _exemplar_bank_for(args, langs)
     en = _en_review(en, out, title, getattr(args, "en_style", None))
+    en = _speech_align(en, out)
     if not en_gate.require(en, out, en_path):
         return 3
     print(

@@ -168,12 +168,59 @@ def _validate_cjk(cue: Cue, spec: LangSpec, conversational: bool = False) -> lis
     return v
 
 
+def _duplicate_runs(
+    sub: Subtitle, n: int = 6, window: int = 3, error_len: int = 9
+) -> list[Violation]:
+    """A run of >= n words that recurs within `window` cues. Graded by the run's FULL length: the
+    real re-emits we measured were 9-12 words; a speaker's own
+    rhetorical repetition ("what is working, what is not working", "…be really successful with
+    React Native") at most 8 — so >= error_len words is an error, shorter ones a warning."""
+    toks: list[tuple[str, int]] = []
+    for k, c in enumerate(sub.cues):
+        toks += [(w, k) for w in re.findall(r"[a-z0-9']+", " ".join(c.lines).lower())]
+    words = [w for w, _ in toks]
+    first: dict[tuple[str, ...], int] = {}
+    flagged: set[int] = set()
+    out: list[Violation] = []
+    for i in range(len(toks) - n + 1):
+        gram = tuple(words[i : i + n])
+        j = first.get(gram)
+        k = toks[i][1]
+        if j is not None and toks[j][1] != k and k - toks[j][1] <= window and k not in flagged:
+            length = n
+            while (
+                i + length < len(words)
+                and j + length < i
+                and words[j + length] == words[i + length]
+            ):
+                length += 1
+            flagged.add(k)
+            out.append(
+                Violation(
+                    sub.cues[k].index,
+                    "duplicate_text",
+                    "error" if length >= error_len else "warn",
+                    f"repeats {length} words {' '.join(words[i:i + length])!r} from cue "
+                    f"{sub.cues[toks[j][1]].index}",
+                )
+            )
+        first.setdefault(gram, i)
+    return out
+
+
 def validate_subtitle(sub: Subtitle, conversational: bool = False) -> list[Violation]:
     spec = spec_for(sub.language)
     out: list[Violation] = []
     sub.renumber()
     for cue in sub.cues:
         out.extend(validate_cue(cue, spec, conversational))
+
+    # DUPLICATED TEXT across neighbouring cues (EN): the same run of >= 6 words twice within a few
+    # cues is a caption/ASR re-emit, not speech ("…instead of just defining how a
+    # product's going to work," shipped twice, the second time raw). Speakers do
+    # repeat themselves, but rarely six words verbatim back-to-back after clean-read.
+    if not spec.cjk:
+        out.extend(_duplicate_runs(sub))
 
     # Neighbor checks: monotonic, non-overlapping, min gap.
     min_gap = spec.min_gap_frames / spec.fps

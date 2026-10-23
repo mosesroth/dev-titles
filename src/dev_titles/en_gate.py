@@ -70,8 +70,54 @@ def approve(out, en, by: str, note: str = "") -> dict:
     return rec
 
 
+SPEECH_SYNC = (
+    "speech_sync.json"  # written by cli._speech_align: EN cues out of sync with the speech
+)
+_MECHANICAL = ("sound_tag", "caption_artifact", "duplicate_text", "overlap", "max_lines", "max_cpl")
+
+
+def mechanical_issues(en, out) -> list[dict]:
+    """Defects no sign-off can waive, as held-line items (they show in EN_LISTEN.html): validation
+    errors (sound tags, '>>' markers, duplicated text, overlaps, line count/width) and EN cues > 2 s
+    out of sync with the speech (speech_sync.json, when it was measured for THIS EN)."""
+    from .validate import validate_subtitle
+
+    def ts(t: float) -> str:
+        return f"{int(t) // 60:02d}:{int(t) % 60:02d}"
+
+    items = []
+    for v in validate_subtitle(en):
+        if v.severity == "error" and v.rule in _MECHANICAL and v.cue_index:
+            c = en.cues[v.cue_index - 1]
+            items.append({"ts": ts(c.start), "kind": v.rule, "detail": v.detail, "quote": c.text})
+    p = Path(out, SPEECH_SYNC)
+    if p.exists():
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        if rec.get("hash") == en_hash(en):
+            for o in rec.get("off", []):
+                if o.get("severity") == "error":
+                    items.append(
+                        {
+                            "ts": ts(o["start"]),
+                            "kind": "speech_sync",
+                            "detail": f"cue starts {-o['offset']:.1f} s after its words are spoken: "
+                            + repr(" ".join(o.get("text", "").split())[:40]),
+                            "quote": o.get("text", ""),
+                        }
+                    )
+    return items
+
+
 def check(en, out) -> tuple[bool, str, list[dict]]:
-    """(ok, reason, open held items). Writes an automatic sign-off when the review held nothing."""
+    """(ok, reason, open held items). Writes an automatic sign-off when the review held nothing.
+    Mechanical defects (mechanical_issues) block even a signed-off EN."""
+    mech = mechanical_issues(en, out)
+    if mech:
+        return (
+            False,
+            f"{len(mech)} mechanical defect(s) in the EN (fix them; no sign-off waives these)",
+            mech,
+        )
     p = Path(out, APPROVAL)
     if p.exists():
         rec = json.loads(p.read_text(encoding="utf-8"))

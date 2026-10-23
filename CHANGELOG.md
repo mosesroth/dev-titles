@@ -23,6 +23,19 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 - ja validation: lines 20-22 wide are a warning (`hard_cpl`), over 22 an error; 19 stays the
   segmenter's target.
 
+- **Sync with the speech** (`validate/speech_sync.py`): EN cue starts are checked against word-timed
+  speech (our ASR words, else the video's YouTube auto-captions). More than 2 s late is an error.
+  `run`/`localize` re-time the EN when needed (text unchanged), and the EN gate blocks translation
+  while cues are still off. `scripts/retime_en_to_speech.py` handles existing tracks.
+- **`duplicate_text` rule:** the same 9+ word run within 3 cues is an error; 6–8 words is a warning.
+- **The EN gate blocks mechanical defects** (sound tags, `>>`, duplicates, overlaps, line count/width,
+  speech sync) even when the EN is signed off.
+- **The cue builder rebalances an orphan** into two 2-line cues before using a third line.
+- **`check_upload.py` also checks** EN vs speech, translation drift vs EN, and parity with the
+  library copy.
+- **A PostToolUse hook** (`scripts/hooks/check_deliverables_hook.py`) validates subtitle files
+  written outside the pipeline.
+
 ### Fixed
 - Translation prompts: per-line speaker / meaning notes were appended to the end of the
   whole-transcript reference block, nothing marked which line was being translated, and the

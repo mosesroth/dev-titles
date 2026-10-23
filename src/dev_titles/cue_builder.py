@@ -220,7 +220,23 @@ def build_en_cues(
                 groups[i - 1] = prev + g
                 groups.pop(i)
                 continue
-            if dur_ok and fits(prev + g, hard_lines):  # 3-line exception to absorb orphan
+            # REBALANCE before any 3rd line: move the end of the previous cue into the orphan so
+            # both fit in 2 lines, preferring a break at punctuation, then balance. The old
+            # first resort — a 3-line cue — is a validation error (max_lines) and had to be
+            # re-split by hand on the speech timings.
+            best = None
+            for k in range(1, len(prev)):
+                a, b = prev[:-k], prev[-k:] + g
+                if fits(a) and fits(b):
+                    ta, tb = " ".join(w.text for w in a), " ".join(w.text for w in b)
+                    score = (0 if ta[-1:] in ",.;:?!—" else 1, abs(len(ta) - len(tb)))
+                    if best is None or score < best[0]:
+                        best = (score, a, b)
+            if best is not None:
+                groups[i - 1], groups[i] = best[1], best[2]
+                i += 1
+                continue
+            if dur_ok and fits(prev + g, hard_lines):  # last resort: 3-line exception
                 groups[i - 1] = prev + g
                 groups.pop(i)
                 continue
