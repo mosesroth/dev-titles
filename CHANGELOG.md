@@ -6,6 +6,11 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 ## [Unreleased]
 
 ### Added
+- **Learn from a human review** (`learn.py`, `scripts/learn_from_review.py`). Keeps only the reviewer's
+  edits that both blind judges prefer, and turns them into lessons: glossary terms, style notes,
+  fixed lines, editor examples. Each lesson is validated with vs without, on its evidence, on
+  other videos and on control lines. A term the reviewers' own other finals contradict is rejected.
+  `--apply` commits the accepted lessons for review.
 - zh second-person referent pass: a "you" that means the guest's team (你们) or the viewers (大家),
   or a generic possessive "your" (将您的应用 -> 将应用), no longer comes out as the 您 reserved for
   the one person addressed. Guarded (only pronoun characters may change) and idempotent.
