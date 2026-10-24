@@ -483,3 +483,14 @@ def test_line_context_window_marks_the_line():
     out = _line_context(2, sents, ["Host", "Guest", "Host", "Guest", "Host", "Guest"], None)
     assert ">> Host: C three." in out and "   Guest: B two." in out and "E five." in out
     assert "F six." not in out and "SPEAKER OF THE LINE TO TRANSLATE: Host" in out
+
+
+def test_fixed_line_matches_whole_sentence_only():
+    from dev_titles.glossary import Glossary
+    from dev_titles.localize import _fixed_line
+
+    g = Glossary(version="t", languages=["ja"], terms=[])
+    g.style = {"ja": {"fixed_lines": {"Sure.": "はい"}}}
+    assert _fixed_line(g, "ja", "  sure. ") == "はい"
+    assert _fixed_line(g, "ja", "Make sure.") is None
+    assert _fixed_line(g, "zh-Hans", "Sure.") is None

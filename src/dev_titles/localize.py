@@ -291,7 +291,10 @@ def _line_context(i: int, sents, spk: list[str], video_vocab, k: int = 2) -> str
     ]
     return (
         "THE LINE IN CONTEXT (>> marks the line you are translating; the others are for "
-        "understanding only — do not translate them):\n"
+        "understanding only — do not translate them). Use them ONLY to understand the line: never "
+        "add anything the line itself doesn't say — no names, products, places, steps or "
+        "explanations taken from the neighbouring lines — and keep a pronoun a pronoun ('it', "
+        "'that one', 'this' stay 它 / 那个 / それ; don't replace them with what they refer to):\n"
         + "\n".join(rows)
         + speaker_note(i, spk)
         + meaning_note(i, (video_vocab or {}).get("meaning_notes"))
@@ -500,6 +503,18 @@ class SentenceRecord:
     txt: str
     residual_miss: str
     issues: list[dict]
+
+
+def _fixed_line(g, lang: str, src: str) -> str | None:
+    """The glossary style's `fixed_lines` rendering when the WHOLE sentence matches (case and
+    spacing ignored), else None. For bare replies whose house rendering the prompt rule didn't
+    hold ("Sure." -> はい)."""
+    table = ((getattr(g, "style", {}) or {}).get(lang, {}) or {}).get("fixed_lines") or {}
+    key = " ".join(src.split()).lower()
+    for k, v in table.items():
+        if " ".join(str(k).split()).lower() == key:
+            return str(v)
+    return None
 
 
 def _load_cache(
@@ -719,7 +734,11 @@ def translate_subtitle(
             # (under its original index) and the by-source index re-finds it on resume.
             rec, iss = reused
         else:
-            if tm is not None and (hit := tm.exact(s.text, lang)) is not None:
+            fixed = _fixed_line(g, lang, s.text)
+            if fixed is not None:
+                logger(f"{lang}: fixed rendering #{i} ({s.text!r})")
+                txt, iss, residual = fixed, [], ""
+            elif tm is not None and (hit := tm.exact(s.text, lang)) is not None:
                 # TM EXACT-MATCH REUSE: an identical source line already has an approved
                 # target — reuse it verbatim for cross-video consistency (no LLM, no gates).
                 logger(f"{lang}: TM exact-match reuse #{i}")

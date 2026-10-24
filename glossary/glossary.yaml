@@ -433,6 +433,12 @@ terms:
 style:
   ja:
     register: teineigo        # です・ます (敬体) throughout — never plain form
+    # A WHOLE sentence that is exactly one of these gets this rendering, no model call (ahead of
+    # a TM exact match). For bare replies where the prompt rule alone didn't hold.
+    fixed_lines:
+      "Sure.": "はい"
+      "Yeah, sure.": "はい"
+      "Sure, yeah.": "はい"
     # Interviews / conversations only (applied when the run is conversational, before `notes`).
     notes_conversational: >-
       SPOKEN REGISTER (interviews / conversations — overrides any presentation-register rule below):
@@ -443,7 +449,9 @@ style:
       pairs (独自のカスタムコマンド -> 独自のコマンド). Spell terms out the way the speaker says them:
       オープンソースプロジェクト, never the abbreviation OSS.
       CLOSING THANKS: "So thanks for joining (today)" at the END of the conversation is past tense:
-      本日はご参加いただきありがとうございました.
+      本日はご参加いただきありがとうございました. It is ご参加 (they took part) — never ご出演 (appearing on
+      a show). 御社 only where the guest's company as a business is meant; "the projects that you release"
+      said to engineers needs no subject at all.
     notes: >-
       PUNCTUATION: write 、 and 。 normally — the normalizer converts 読点 、 to a half-width
       space and 句点 。 to a full-width space (the common Japanese subtitle convention). Omit
@@ -504,7 +512,7 @@ style:
       chummy. All other rules below (de-calque, pronoun economy, specificity, punctuation)
       still apply.
       CLOSING THANKS: "thanks for joining (today)" -> 感谢各位今天的参与 — not 能来 / 到场, which mean
-      physical attendance.
+      physical attendance. "Thanks for the invitation." -> 感谢邀请 (no 您的).
       GENERIC "YOU": when "you / your" means anyone or developers in general ("you can speed up
       logging in with adb", "package your app as a framework"), OMIT the pronoun —
       可以用adb命令加快登录应用的速度, 将应用打包为框架 — never 您可以 / 您的应用 for the generic you.
