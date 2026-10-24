@@ -447,6 +447,29 @@ def _target_speech_check(en, out: Path, outputs) -> None:
             print(f"{o.language}: speech-sync check skipped ({type(e).__name__})")
             continue
         errs = [x for x in r["off"] if x["severity"] == "error"]
+        if errs:  # fix it: lay the out-of-step runs into their spoken windows (text unchanged)
+            from .validate.content_sync import retime_target_to_speech
+
+            new, moved = retime_target_to_speech(
+                o.subtitle,
+                en,
+                speech,
+                CliTranslator()._invoke,
+                lang_name={"zh-Hans": "Chinese", "ja": "Japanese"}.get(o.language, o.language),
+                cache_path=out / f"target_sync_map.{o.language}.json",
+            )
+            if moved:
+                o.subtitle = new
+                r = content_speech_desync(
+                    new,
+                    en,
+                    speech,
+                    CliTranslator()._invoke,
+                    lang_name={"zh-Hans": "Chinese", "ja": "Japanese"}.get(o.language, o.language),
+                    cache_path=out / f"target_sync_map.{o.language}.json",
+                )
+                errs = [x for x in r["off"] if x["severity"] == "error"]
+                print(f"{o.language}: re-timed {moved} cue(s) to the speech")
         rec[o.language] = r
         print(
             f"{o.language}: speech sync — {r['checked']} cues checked, {len(errs)} out of step"

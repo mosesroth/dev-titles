@@ -56,12 +56,19 @@ def sentence_speech_windows(sents, speech) -> dict[int, tuple[float, float]]:
     return {i: (min(t), max(t) + 0.4) for i, t in times.items()}
 
 
+def _key_text(t: str) -> str:
+    """Cache key text without punctuation / spacing, so a cosmetic fix (a stripped line-final ，)
+    or a re-time reuses the mapping instead of re-asking the model."""
+    return re.sub(r"[\s\W_]+", "", t)
+
+
 def _map_cues(
     target, sents, windows, invoke, lang_name, cache_path, chunk: int = 40
 ) -> dict[int, tuple]:
     key = hashlib.sha256(
         json.dumps(
-            [[c.text for c in target.cues], [s.text for s in sents]], ensure_ascii=False
+            [[_key_text(c.text) for c in target.cues], [_key_text(s.text) for s in sents]],
+            ensure_ascii=False,
         ).encode()
     ).hexdigest()[:16]
     cp = Path(cache_path) if cache_path else None
@@ -144,3 +151,95 @@ def content_speech_desync(target, en, speech, invoke, *, lang_name: str, cache_p
         if not any(n and n["gap"] > TOL_ERROR and n["late"] == o["late"] for n in nb):
             o["severity"] = "warn"
     return {"checked": checked, "mapped": len(mapping), "off": off}
+
+
+def retime_target_to_speech(
+    target, en, speech, invoke, *, lang_name: str, cache_path=None, spec=None
+):
+    """Move each RUN of out-of-step target cues (content_speech_desync errors) into the time window
+    in which their content is spoken: the run's cues are laid out across that window — bounded by
+    the neighbouring cues — in proportion to their text length. Text is never changed; a run whose
+    new layout would break min duration / overlap stays where it was. Returns (subtitle, cues moved).
+    """
+    import copy
+
+    from ..config import spec_for
+    from ..resegment import merge_en_to_sentences
+    from .rules import validate_subtitle
+
+    spec = spec or spec_for(target.language)
+    rep = content_speech_desync(
+        target, en, speech, invoke, lang_name=lang_name, cache_path=cache_path
+    )
+    bad = sorted(o["cue"] - 1 for o in rep["off"] if o["severity"] == "error")
+    if not bad:
+        return target, 0
+    sents = merge_en_to_sentences(en)
+    windows = sentence_speech_windows(sents, speech)
+    mapping = _map_cues(target, sents, windows, invoke, lang_name, cache_path)
+    runs, cur = [], [bad[0]]
+    for k in bad[1:]:
+        if k == cur[-1] + 1:
+            cur.append(k)
+        else:
+            runs.append(cur)
+            cur = [k]
+    runs.append(cur)
+    out = copy.deepcopy(target)
+    cues = out.cues
+    moved = 0
+
+    def win_start(k):
+        ids = [x for x in mapping.get(k, ()) if x is not None and x in windows]
+        return min(windows[x][0] for x in ids) if ids else None
+
+    # EXTEND each run over the following cues that also start > 1 s before their own content
+    # (early cues touching their window aren't flagged, but they box the run in)
+    for run in runs:
+        k = run[-1] + 1
+        while k < len(cues) and (w := win_start(k)) is not None and w - cues[k].start > TOL_WARN:
+            run.append(k)
+            k += 1
+
+    def n_errors(sub) -> int:
+        r = content_speech_desync(
+            sub, en, speech, invoke, lang_name=lang_name, cache_path=cache_path
+        )
+        return sum(o["severity"] == "error" for o in r["off"])
+
+    base = len(bad)
+    for run in runs:
+        ids = [x for k in run for x in mapping.get(k, ()) if x is not None and x in windows]
+        if not ids:
+            continue
+        w0, w1 = min(windows[x][0] for x in ids), max(windows[x][1] for x in ids)
+        lo = max(w0 - 0.1, cues[run[0] - 1].end if run[0] else 0.0)
+        hi = max(w1 + 0.6, lo + spec.min_dur * len(run))
+        saved = [(c.start, c.end) for c in cues]
+        lens = [max(len("".join(cues[k].lines)), 1) for k in run]
+        t = lo
+        for k, n in zip(run, lens):
+            d = max((hi - lo) * n / sum(lens), spec.min_dur)
+            cues[k].start, cues[k].end = round(t, 3), round(t + d, 3)
+            t = cues[k].end
+        # CASCADE: a following cue the run now overlaps starts after it (it was early too — its
+        # content comes after the run's), keeping its reading time
+        for k in range(run[-1] + 1, len(cues)):
+            if cues[k].start >= cues[k - 1].end - 1e-3:
+                break
+            dur = max(cues[k].end - cues[k].start, spec.min_dur)
+            cues[k].start = cues[k - 1].end
+            cues[k].end = round(cues[k].start + dur, 3)
+        errs = [
+            v
+            for v in validate_subtitle(out)
+            if v.severity == "error" and v.rule in ("overlap", "min_dur")
+        ]
+        now = n_errors(out)
+        if errs or now >= base:
+            for c, (a, b) in zip(cues, saved):
+                c.start, c.end = a, b
+            continue
+        base = now
+        moved += len(run)
+    return out, moved

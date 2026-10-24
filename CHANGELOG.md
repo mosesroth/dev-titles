@@ -31,6 +31,12 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
   (one cached LLM call) to the EN sentences it carries, and those are timed by the speech. A run of
   2+ cues more than 2 s off is an error. Runs in `check_upload.py` and after `localize`. EN more than
   5 s early is now an error too.
+- **Silence inside one EN cue** (more than 3 s) is an error: part of the text shows early. The
+  re-timer splits such a cue at the silence.
+- **zh/ja auto re-time** (`retime_target_to_speech`, also `scripts/retime_target_to_speech.py`):
+  out-of-step runs move into their spoken window. Runs after translation.
+- **A sign-off survives a timing-only change** (text-only hash).
+- **New line rules:** `punct_line_start`, `line_whitespace`, `space_before_punct`.
 - **`zh_line_end_punct` rule** (CN style guide: no ，、； at a line end).
 - **`duplicate_text` rule:** the same 9+ word run within 3 cues is an error; 6–8 words is a warning.
 - **The EN gate blocks mechanical defects** (sound tags, `>>`, duplicates, overlaps, line count/width,

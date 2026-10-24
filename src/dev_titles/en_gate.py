@@ -64,8 +64,21 @@ def review_state(out) -> tuple[str, list[dict]]:
     return "ok", held
 
 
+def text_hash(en) -> str:
+    """Hash of the EN TEXT only (whitespace-normalized). A sign-off is about the words; re-timing
+    the cues to the speech (validate/speech_sync.py) must not void it."""
+    t = " ".join(" ".join(" ".join(c.lines) for c in en.cues).split())
+    return hashlib.sha1(t.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
 def approve(out, en, by: str, note: str = "") -> dict:
-    rec = {"hash": en_hash(en), "by": by, "at": time.strftime("%Y-%m-%d %H:%M"), "note": note}
+    rec = {
+        "hash": en_hash(en),
+        "text_hash": text_hash(en),
+        "by": by,
+        "at": time.strftime("%Y-%m-%d %H:%M"),
+        "note": note,
+    }
     Path(out, APPROVAL).write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
     return rec
 
@@ -100,7 +113,11 @@ def mechanical_issues(en, out) -> list[dict]:
                         {
                             "ts": ts(o["start"]),
                             "kind": "speech_sync",
-                            "detail": f"cue starts {-o['offset']:.1f} s after its words are spoken: "
+                            "detail": (
+                                f"{o['offset']:.1f} s silence inside the cue (text shown early): "
+                                if o.get("kind") == "pause"
+                                else f"cue starts {-o['offset']:+.1f} s from its words: "
+                            )
                             + repr(" ".join(o.get("text", "").split())[:40]),
                             "quote": o.get("text", ""),
                         }
@@ -123,6 +140,12 @@ def check(en, out) -> tuple[bool, str, list[dict]]:
         rec = json.loads(p.read_text(encoding="utf-8"))
         if rec.get("hash") == en_hash(en):
             return True, f"EN signed off ({rec.get('by')}, {rec.get('at')})", []
+        if rec.get("text_hash") and rec["text_hash"] == text_hash(en):
+            return (
+                True,
+                f"EN signed off ({rec.get('by')}, {rec.get('at')}; re-timed since, text unchanged)",
+                [],
+            )
         stale = "the EN changed since it was signed off"
     else:
         stale = ""

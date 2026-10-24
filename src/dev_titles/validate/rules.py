@@ -88,6 +88,31 @@ def validate_cue(cue: Cue, spec: LangSpec, conversational: bool = False) -> list
             # exceeds the cap — surface it for review, don't fail on it.
             v.append(Violation(idx, "max_cps", "warn", f"{cps:.1f} cps > {warn_cps}"))
 
+    # A SPACE BEFORE PUNCTUATION in Latin text ("React.js ." / "React.js ,") — a re-join artifact
+    # Not for CJK: ja uses a space as its comma.
+    if not spec.cjk and re.search(r"\w \s*[.,;:?!](?=\s|$)", " ".join(cue.lines)):
+        v.append(
+            Violation(
+                idx,
+                "space_before_punct",
+                "error",
+                f"space before punctuation: {' '.join(cue.lines)[:60]!r}",
+            )
+        )
+
+    if not spec.cjk and any(re.match(r"[.,;:?!](\s|$)", ln) for ln in cue.lines):  # not ".NET"
+        v.append(
+            Violation(
+                idx, "punct_line_start", "error", f"line starts with punctuation: {cue.lines}"
+            )
+        )
+    if any(ln != ln.strip() for ln in cue.lines):
+        v.append(
+            Violation(
+                idx, "line_whitespace", "error", f"leading/trailing space in a line: {cue.lines}"
+            )
+        )
+
     # Degenerate repetition (ASR / LLM hallucination) — warn.
     repeated, unit = is_repeated_text("".join(cue.lines))
     if repeated:

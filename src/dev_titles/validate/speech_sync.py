@@ -24,6 +24,10 @@ LATE_S = 1.0  # WARN: the cue starts this much AFTER its first word is spoken (t
 LATE_ERROR_S = 2.0  # ERROR beyond this. 1-2 s late is typically a sentence's tail word carried
 # into the next cue ("…finds it / interesting."); the defect that motivated this was 4.2 s.
 EARLY_ERROR_S = 5.0  # ERROR: text on screen this long before it is said (a 6 s "Hi" opening cue)
+PAUSE_S = (
+    3.0  # ERROR: a silence this long INSIDE one cue — the text after it is on screen that much
+)
+# before it is said. The cue-start check can't see it: the cue starts on time.
 EARLY_S = 3.0  # WARN: the cue starts this much BEFORE its words (e.g. it kept the time span of
 # filler that clean-read deleted, so the text sits on screen while "um, you know" is said)
 
@@ -101,6 +105,7 @@ def speech_sync_report(en, speech: list[tuple[str, float]]) -> dict:
         pos_in_cue.append(n)
         last = k
     matched = 0
+    in_cue: dict[int, list[tuple[int, float]]] = {}  # cue -> [(word position, speech time)]
     for blk in sm.get_matching_blocks():
         if blk.size < 2:  # a lone common word ("the") is not evidence of alignment
             continue
@@ -108,6 +113,7 @@ def speech_sync_report(en, speech: list[tuple[str, float]]) -> dict:
             i = blk.a + d
             matched += 1
             k = en_tok[i][1]
+            in_cue.setdefault(k, []).append((pos_in_cue[i], speech[blk.b + d][1]))
             if k not in first_hit or pos_in_cue[i] < first_hit[k][0]:
                 first_hit[k] = (pos_in_cue[i], speech[blk.b + d][1])
     rows, off = [], []
@@ -129,6 +135,24 @@ def speech_sync_report(en, speech: list[tuple[str, float]]) -> dict:
                     "text": c.text[:60],
                 }
             )
+    for k, hits in sorted(in_cue.items()):
+        hits.sort()
+        gaps = [(b[1] - a[1], a[0]) for a, b in zip(hits, hits[1:]) if b[0] == a[0] + 1]
+        if gaps and max(gaps)[0] > PAUSE_S:
+            g, pos = max(gaps)
+            c = en.cues[k]
+            off.append(
+                {
+                    "cue": k + 1,
+                    "start": round(c.start, 2),
+                    "offset": round(g, 2),
+                    "kind": "pause",
+                    "after_word": pos,
+                    "severity": "error",
+                    "text": c.text[:60],
+                }
+            )
+    off.sort(key=lambda o: o["start"])
     ds = sorted(d for _, _, d in rows)
     return {
         "checked": len(rows),
@@ -210,6 +234,73 @@ def _cue_word_times(en, speech) -> dict[int, tuple[float, float]]:
     return {k: (first[k], last[k]) for k in first if k in last and last[k] >= first[k]}
 
 
+def _split_at_pauses(en, speech, spec):
+    """Split every cue that holds a long silence (speech_sync_report kind "pause") at that silence;
+    text unchanged, each part re-broken into lines. A fragment of <= 2 words joins the neighbouring
+    cue on ITS side of the silence (before it: the previous cue; after it: the next one) when that
+    still fits; a split that can't be laid out legally is not made. Times are rough here —
+    retime_to_speech snaps them to the words right after."""
+    import copy
+
+    from ..model import Cue, Subtitle
+    from ..segment import break_lines
+
+    def fits(text: str) -> bool:
+        ls = break_lines(text, spec)
+        return len(ls) <= spec.max_lines and all(len(x) <= spec.max_cpl for x in ls)
+
+    pauses = {
+        o["cue"] - 1: o for o in speech_sync_report(en, speech)["off"] if o.get("kind") == "pause"
+    }
+    if not pauses:
+        return en
+    cues = [copy.deepcopy(c) for c in en.cues]
+    out: list = []
+    carry = ""  # a <= 2-word fragment waiting to be prefixed to the next cue
+    for k, c in enumerate(cues):
+        raw = (carry + " " + " ".join(c.lines)).split() if carry else " ".join(c.lines).split()
+        shift = len(carry.split()) if carry else 0
+        carry = ""
+        o = pauses.get(k)
+        idx, n = None, -1
+        if o is not None:
+            for jj, w in enumerate(raw[shift:]):  # positions count only tokens that normalize
+                if _norm(w):
+                    n += 1
+                    if n == o["after_word"]:
+                        idx = jj + shift
+                        break
+        if idx is None or idx + 1 >= len(raw):
+            # untouched cue keeps its own lines; only a cue that received a carried fragment is re-broken
+            lines = break_lines(" ".join(raw), spec) if shift else list(c.lines)
+            out.append(Cue(c.start, c.end, lines))
+            continue
+        a, b = raw[: idx + 1], raw[idx + 1 :]
+        ta, tb = " ".join(a), " ".join(b)
+        mid = c.start + (c.end - c.start) * len(ta) / max(len(ta) + len(tb), 1)
+        if len(a) <= 2 and out and fits(out[-1].text.replace("\n", " ") + " " + ta):
+            prev = out[-1]
+            out[-1] = Cue(
+                prev.start, mid, break_lines(prev.text.replace("\n", " ") + " " + ta, spec)
+            )
+            out.append(Cue(mid, c.end, break_lines(tb, spec)))
+        elif (
+            len(b) <= 2
+            and k + 1 < len(cues)
+            and fits(tb + " " + cues[k + 1].text.replace("\n", " "))
+        ):
+            out.append(Cue(c.start, mid, break_lines(ta, spec)))
+            carry = tb
+        elif fits(ta) and fits(tb):  # a short part stands alone: the silence gives it reading time
+            out += [
+                Cue(c.start, mid, break_lines(ta, spec)),
+                Cue(mid, c.end, break_lines(tb, spec)),
+            ]
+        else:
+            out.append(Cue(c.start, c.end, break_lines(" ".join(raw), spec)))
+    return Subtitle(en.language, out).renumber()
+
+
 def retime_to_speech(en, speech, spec=None, lead: float = 0.1, tail: float = 0.6):
     """Snap EN cue boundaries to the speech: a cue starts `lead` s before its first word and runs
     to its last word + `tail` (or the next cue's start). Text is never touched; a cue whose words
@@ -221,6 +312,7 @@ def retime_to_speech(en, speech, spec=None, lead: float = 0.1, tail: float = 0.6
 
     spec = spec or spec_for("en")
     gap = 0.0  # contiguous cues are fine (the validator only flags real overlaps / tiny gaps)
+    en = _split_at_pauses(en, speech, spec)
     wt = _cue_word_times(en, speech)
     out = copy.deepcopy(en)
     cues = out.cues
@@ -244,28 +336,27 @@ def retime_to_speech(en, speech, spec=None, lead: float = 0.1, tail: float = 0.6
         if abs(s - c.start) > 0.25 or abs(e - c.end) > 0.25:
             c.start, c.end = round(s, 3), round(e, 3)
             moved += 1
-    # REPAIR: a cue that couldn't be placed kept its old start, which a snapped neighbour may now
-    # overrun. Trim the earlier cue if it stays readable, else put both back where they were —
-    # repeat until no cue overlaps or is too short (bounded: each step only reverts).
-    orig = en.cues
-    for _ in range(len(cues)):
-        bad = next(
-            (
-                k
-                for k in range(1, len(cues))
-                if cues[k].start < cues[k - 1].end - 1e-3
-                or cues[k - 1].end - cues[k - 1].start < spec.min_dur - 1e-3
-            ),
-            None,
-        )
-        if bad is None:
-            break
-        a, b = cues[bad - 1], cues[bad]
-        if b.start - a.start >= spec.min_dur:
-            a.end = b.start
-        else:
-            for j in (bad - 1, bad):
-                cues[j].start, cues[j].end = orig[j].start, orig[j].end
+    # REPAIR (one forward sweep, never stuck): an overlap trims the earlier cue when it stays
+    # readable; a cue left too short borrows time from the silence after it, else before it.
+    for k in range(len(cues)):
+        c = cues[k]
+        nxt = cues[k + 1].start if k + 1 < len(cues) else None
+        prv = cues[k - 1].end if k else 0.0
+        if nxt is not None and c.end > nxt:
+            c.end = max(nxt, c.start)
+        if c.end - c.start < spec.min_dur:
+            want = c.start + spec.min_dur
+            c.end = min(want, nxt) if nxt is not None else want
+            if c.end - c.start < spec.min_dur:
+                c.start = max(prv, c.end - spec.min_dur)
+            if (
+                c.end - c.start < spec.min_dur and k
+            ):  # still short: borrow from a roomy previous cue
+                p_ = cues[k - 1]
+                need = spec.min_dur - (c.end - c.start)
+                if p_.end - p_.start - need >= spec.min_dur:
+                    p_.end = round(p_.end - need, 3)
+                    c.start = p_.end
     return out, moved
 
 

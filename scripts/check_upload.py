@@ -102,7 +102,11 @@ def main(argv=None) -> int:
             else:
                 r = speech_sync_report(en, speech)
                 for o in r["off"]:
-                    msg = f"{p.name} {o['start']:.1f}s: cue {o['offset']:+.1f}s from speech — {o['text']!r}"
+                    msg = (
+                        f"{p.name} {o['start']:.1f}s: {o['offset']:.1f}s silence inside the cue — {o['text']!r}"
+                        if o.get("kind") == "pause"
+                        else f"{p.name} {o['start']:.1f}s: cue {o['offset']:+.1f}s from speech — {o['text']!r}"
+                    )
                     (failures if o["severity"] == "error" else warnings).append(msg)
         for q in folder.glob(f"{video}.*.srt"):
             lang = _lang(q.name)

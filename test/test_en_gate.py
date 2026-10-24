@@ -77,3 +77,20 @@ def test_blocked_gate_writes_listen_page(tmp_path):
     page = (tmp_path / "EN_LISTEN.html").read_text(encoding="utf-8")
     assert "watch?v=abcDEF12345&t=826s" in page  # 2 s before 13:48.7
     assert "<span class='q'>this plush where we can just use it</span>" in page.replace("\n", " ")
+
+
+def test_sign_off_survives_a_timing_only_change(tmp_path):
+    import copy
+
+    from dev_titles import en_gate
+    from dev_titles.model import Cue, Subtitle
+
+    en = Subtitle("en", [Cue(0.0, 2.0, ["Hello there."]), Cue(2.0, 4.0, ["Welcome back."])])
+    en_gate.save_review_state(tmp_path, "ok", [{"ts": "00:01", "kind": "x", "detail": "y"}])
+    en_gate.approve(tmp_path, en, by="t")
+    moved = copy.deepcopy(en)
+    moved.cues[1].start = 2.5
+    assert en_gate.check(moved, tmp_path)[0]
+    edited = copy.deepcopy(en)
+    edited.cues[1].lines = ["Welcome back, everyone."]
+    assert not en_gate.check(edited, tmp_path)[0]

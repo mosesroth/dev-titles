@@ -149,3 +149,50 @@ def test_content_sync_flags_a_run_of_cues_shown_late(tmp_path):
         o["severity"]
         for o in content_speech_desync(one, en, _speech(), inv, lang_name="Chinese")["off"]
     ] == ["warn"]
+
+
+def test_silence_inside_a_cue_is_flagged_and_split():
+    words = "sorry no okay it was playing".split()
+    times = [10.0, 16.0, 16.8, 17.3, 17.5, 17.8]  # 6 s silence after "sorry"
+    speech = list(zip(words, times))
+    en = Subtitle(
+        "en", [Cue(9.9, 16.0, ["Sorry. No. Okay. It was"]), Cue(17.6, 19.6, ["playing."])]
+    )
+    rep = speech_sync_report(en, speech)
+    assert [o["kind"] for o in rep["off"] if o.get("kind")] == ["pause"]
+    new, _ = retime_to_speech(en, speech)
+    assert [c.text for c in new.cues][:2] == ["Sorry.", "No. Okay. It was"]
+    assert new.cues[1].start > 15.0 and not [
+        o for o in speech_sync_report(new, speech)["off"] if o["severity"] == "error"
+    ]
+
+
+def test_retime_target_moves_a_late_run_into_its_spoken_window():
+    from dev_titles.validate.content_sync import content_speech_desync, retime_target_to_speech
+
+    en = Subtitle(
+        "en",
+        [
+            Cue(10.0, 13.0, ["So you can run it on the device."]),
+            Cue(13.0, 17.5, ["And then we ship the app to every user today."]),
+        ],
+    )
+    late = Subtitle(
+        "zh-Hans",
+        [
+            Cue(20.0, 23.0, ["所以您可以在设备上运行它"]),
+            Cue(23.0, 26.0, ["然后我们把应用发给所有用户"]),
+        ],
+    )
+    inv = lambda p: '{"0": [0, 0], "1": [1, 1]}'  # noqa: E731
+    new, moved = retime_target_to_speech(late, en, _speech(), inv, lang_name="Chinese")
+    assert (
+        moved == 2
+        and new.cues[0].start < 11
+        and [c.text for c in new.cues] == [c.text for c in late.cues]
+    )
+    assert not [
+        o
+        for o in content_speech_desync(new, en, _speech(), inv, lang_name="Chinese")["off"]
+        if o["severity"] == "error"
+    ]
