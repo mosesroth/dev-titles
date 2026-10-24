@@ -439,6 +439,9 @@ style:
       "Sure.": "はい"
       "Yeah, sure.": "はい"
       "Sure, yeah.": "はい"
+      # "So thanks for…" closes the conversation (an opening thanks has no "So") — past tense, ご参加
+      "So thanks for joining today.": "本日はご参加いただきありがとうございました"
+      "So thanks for joining.": "本日はご参加いただきありがとうございました"
     # Interviews / conversations only (applied when the run is conversational, before `notes`).
     notes_conversational: >-
       SPOKEN REGISTER (interviews / conversations — overrides any presentation-register rule below):

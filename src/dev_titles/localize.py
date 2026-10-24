@@ -272,7 +272,20 @@ def _ctx_for(sents, video_vocab) -> str:
     return _with_brief(labeled_transcript(sents, _speakers_for(sents, video_vocab)), video_vocab)
 
 
-def _line_context(i: int, sents, spk: list[str], video_vocab, k: int = 2) -> str:
+# How a translation handles "it / that one / you / we" (A/B vs human finals): zh
+# keeps the pronoun (replacing it with its referent was the 'MLC的GPU加速' addition); Japanese drops
+# pronouns — keeping them literally read stiff (それらの / あなたとは / 私達は) and the reviewer instead
+# named what the line already refers to (モデルを実行する方法, 選択肢は多数).
+_PRONOUN_RULE = {
+    "zh-Hans": "Keep a pronoun a pronoun ('it', 'that one', 'this' stay 它 / 那个 / 这个; don't replace "
+    "them with what they refer to)",
+    "ja": "Japanese drops pronouns: don't render 'it / that / they / you / we' literally (no それら / "
+    "あなた / 私達は) — leave them out, or, where Japanese needs an object, name the thing the line "
+    "already refers to (モデルを実行する方法). That is not an addition; a new fact is",
+}
+
+
+def _line_context(i: int, sents, spk: list[str], video_vocab, k: int = 2, lang: str = "") -> str:
     """The line in its local context — the k lines before and after (speaker-labeled, the line
     marked >>) — plus its speaker and meaning notes, for the prompt block beside the line
     (TranslationRequest.line_context). On A/B lines against a human final the old placement (notes
@@ -292,9 +305,10 @@ def _line_context(i: int, sents, spk: list[str], video_vocab, k: int = 2) -> str
     return (
         "THE LINE IN CONTEXT (>> marks the line you are translating; the others are for "
         "understanding only — do not translate them). Use them ONLY to understand the line: never "
-        "add anything the line itself doesn't say — no names, products, places, steps or "
-        "explanations taken from the neighbouring lines — and keep a pronoun a pronoun ('it', "
-        "'that one', 'this' stay 它 / 那个 / それ; don't replace them with what they refer to):\n"
+        "add facts the line itself doesn't say — no names, products, places, steps or explanations "
+        "taken from the neighbouring lines. "
+        + _PRONOUN_RULE.get(lang, _PRONOUN_RULE["zh-Hans"])
+        + ":\n"
         + "\n".join(rows)
         + speaker_note(i, spk)
         + meaning_note(i, (video_vocab or {}).get("meaning_notes"))
@@ -753,7 +767,7 @@ def translate_subtitle(
                     _LANG_NAME.get(lang, lang),
                     spec,
                     ctx=ctx,
-                    line_context=_line_context(i, sents, spk, video_vocab),
+                    line_context=_line_context(i, sents, spk, video_vocab, lang=lang),
                     exemplar_bank=exemplar_bank,
                     extra_dnt=extra_dnt,
                     invoke=invoke,
@@ -951,7 +965,9 @@ def make_retranslate(
         # referent 'on some of them'). Give the model the IMMEDIATE neighbors so it can resolve
         # who's speaking / what a pronoun points to — this is exactly the context the whole-doc
         # blob dilutes. It's for disambiguation only; only the target line is translated.
-        _line = _line_context(rec.i, sents, _speakers_for(sents, video_vocab), video_vocab)
+        _line = _line_context(
+            rec.i, sents, _speakers_for(sents, video_vocab), video_vocab, lang=lang
+        )
         txt, iss = translate_segment(
             translator,
             g,
