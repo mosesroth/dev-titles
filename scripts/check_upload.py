@@ -115,7 +115,10 @@ def main(argv=None) -> int:
             tgt = _read_any(str(q), lang).cues
             rep = sync_report(tgt, en.cues)
             if rep["drifted"]:
-                failures.append(
+                # the name-anchor drift check is the FALLBACK; when the speech timings exist the
+                # content-vs-speech check below decides (anchors are noisy on long merged cues:
+                # three in-sync zh tracks measured 30-42% "far" here and 0 cues off vs the speech)
+                (warnings if speech else failures).append(
                     f"{q.name}: drifted from the EN (median {rep['median']} s, {rep['far_share']:.0%} far)"
                 )
             for d in local_desync(tgt, en.cues, tol=5.0):

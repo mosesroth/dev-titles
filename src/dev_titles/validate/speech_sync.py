@@ -236,9 +236,11 @@ def _cue_word_times(en, speech) -> dict[int, tuple[float, float]]:
 
 def _split_at_pauses(en, speech, spec):
     """Split every cue that holds a long silence (speech_sync_report kind "pause") at that silence;
-    text unchanged, each part re-broken into lines. A fragment of <= 2 words joins the neighbouring
-    cue on ITS side of the silence (before it: the previous cue; after it: the next one) when that
-    still fits; a split that can't be laid out legally is not made. Times are rough here —
+    text unchanged, each part re-broken into lines. A fragment of <= 2 words BEFORE the silence joins
+    the previous cue when that fits; otherwise each part stands alone (the silence gives it reading
+    time). A fragment after the silence is never pushed into the next cue: another silence may lie
+    between them. A split that can't be laid out
+    legally is not made. Times are rough here —
     retime_to_speech snaps them to the words right after."""
     import copy
 
@@ -284,13 +286,6 @@ def _split_at_pauses(en, speech, spec):
                 prev.start, mid, break_lines(prev.text.replace("\n", " ") + " " + ta, spec)
             )
             out.append(Cue(mid, c.end, break_lines(tb, spec)))
-        elif (
-            len(b) <= 2
-            and k + 1 < len(cues)
-            and fits(tb + " " + cues[k + 1].text.replace("\n", " "))
-        ):
-            out.append(Cue(c.start, mid, break_lines(ta, spec)))
-            carry = tb
         elif fits(ta) and fits(tb):  # a short part stands alone: the silence gives it reading time
             out += [
                 Cue(c.start, mid, break_lines(ta, spec)),
