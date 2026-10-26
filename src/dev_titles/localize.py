@@ -276,9 +276,18 @@ def _ctx_for(sents, video_vocab) -> str:
 # keeps the pronoun (replacing it with its referent was the 'MLC的GPU加速' addition); Japanese drops
 # pronouns — keeping them literally read stiff (それらの / あなたとは / 私達は) and the reviewer instead
 # named what the line already refers to (モデルを実行する方法, 選択肢は多数).
+# zh used to say "'it' / 'that one' / 'this' stay 它 / 那个 / 这个", which contradicted the style
+# note's pronoun drop and produced the calques the 3-video panel's reviewers removed (把它规模化,
+# 更多地使用它, 那个实验阶段, 操控这个, 为它提供): the no-referent
+# guard stays, the literal object / article pronoun goes (a subject one stays: the first spot A/B dropped those too).
 _PRONOUN_RULE = {
-    "zh-Hans": "Keep a pronoun a pronoun ('it', 'that one', 'this' stay 它 / 那个 / 这个; don't replace "
-    "them with what they refer to)",
+    "zh-Hans": "Don't replace a pronoun with what it refers to (no names or things from the "
+    "neighbouring lines), but don't calque it either: drop an object 'it' Chinese doesn't need "
+    "(扩大规模, not 把它规模化; 用得越来越多, not 更多地使用它), drop 'that / this' used as an "
+    "article (实验阶段, not 那个实验阶段), refer back to a thing with 它, not a repeated 这个 "
+    "(等它出现后…操控它), and 'for that / for it' about a situation is 为此. A SUBJECT pronoun or "
+    "demonstrative stays (它们运行得很好, 这是我们的基础, 这个问题现在就能解决), and so does "
+    "the line's own object when dropping it leaves the verb without one (使用它的方式)",
     "ja": "Japanese drops pronouns: don't render 'it / that / they / you / we' literally (no それら / "
     "あなた / 私達は) — leave them out, or, where Japanese needs an object, name the thing the line "
     "already refers to (モデルを実行する方法). That is not an addition; a new fact is",

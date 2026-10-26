@@ -485,6 +485,18 @@ def test_line_context_window_marks_the_line():
     assert "F six." not in out and "SPEAKER OF THE LINE TO TRANSLATE: Host" in out
 
 
+def test_line_context_pronoun_rule_per_language():
+    """zh: no referent substitution AND no literal 它/那个/这个 calque (the style note's pronoun drop;
+    the old 'stay 它 / 那个 / 这个' contradicted it); ja: drop pronouns."""
+    from dev_titles.localize import _line_context
+
+    sents = [_sent(t) for t in ["We built it.", "Scale it.", "Done."]]
+    zh = _line_context(1, sents, [], None, lang="zh-Hans")
+    assert "Don't replace a pronoun" in zh and "don't calque it" in zh and "把它规模化" in zh
+    assert "stay 它 / 那个 / 这个" not in zh
+    assert "Japanese drops pronouns" in _line_context(1, sents, [], None, lang="ja")
+
+
 def test_fixed_line_matches_whole_sentence_only():
     from dev_titles.glossary import Glossary
     from dev_titles.localize import _fixed_line
