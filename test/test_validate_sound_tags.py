@@ -74,3 +74,8 @@ def test_bundle_never_writes_sound_tags(tmp_path):
 def test_zh_line_end_punct_is_an_error():
     assert ("zh_line_end_punct", "error") in _rules("zh-Hans", "我们来聊聊，")
     assert not any(r == "zh_line_end_punct" for r, _ in _rules("zh-Hans", "我们来聊聊"))
+
+
+def test_empty_cue_is_an_error():
+    sub = Subtitle("en", [Cue(0.0, 2.0, ["Hello."]), Cue(2.0, 4.0, [""])])
+    assert ("empty_cue", "error") in {(v.rule, v.severity) for v in validate_subtitle(sub)}

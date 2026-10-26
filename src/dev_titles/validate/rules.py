@@ -106,6 +106,10 @@ def validate_cue(cue: Cue, spec: LangSpec, conversational: bool = False) -> list
                 idx, "punct_line_start", "error", f"line starts with punctuation: {cue.lines}"
             )
         )
+    if not "".join(cue.lines).strip():
+        # an empty cue: a blank subtitle event. YouTube drops it, but it is a defect in the file
+        # (one appeared when a fix moved an orphaned '.' to the previous cue; another shipped live).
+        v.append(Violation(idx, "empty_cue", "error", "cue has no text"))
     if any(ln != ln.strip() for ln in cue.lines):
         v.append(
             Violation(
