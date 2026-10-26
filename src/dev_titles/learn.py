@@ -39,7 +39,8 @@ like the reviewer's in OTHER videos too. Propose AT MOST ONE lesson per row, and
   "target": "<{L} rendering>", "avoid": ["<our wrong rendering>"], "notes": "<why>"}}
 - "style_note": a short, general rule about phrasing/register (not about this one sentence) —
   {{"text": "<rule, with a short example>"}}
-- "fixed_line": a WHOLE short line (a reply, a closing) that always has the same rendering —
+- "fixed_line": a WHOLE line whose rendering NEVER depends on context (rare — NOT conversational replies or
+  closings, whose rendering depends on who speaks to whom; those are style notes) —
   {{"source": "<exact English line>", "target": "<{L}>"}}
 - "editor_example": a reusable naturalness fix shown by example — {{"label": "<3-6 words>"}}
 - "none": a one-off choice, context-specific, or reviewer preference with no general rule
@@ -233,6 +234,42 @@ def reviewer_counterevidence(x, finals_dir, skip: str) -> list[str]:
             if n:
                 hits.append(f"{p.name.split('.')[0]}: {a!r} x{n}")
     return hits
+
+
+def corpus_support(source: str, lang: str, pairs) -> dict:
+    """How the reviewers' own finals translate this EXACT English line: `pairs` = (en, human target,
+    video) from the approved corpus (the TM, the A/B alignments). {'n', 'videos', 'top', 'top_n',
+    'top_videos'}: the most frequent rendering and its support."""
+    key = " ".join(source.split()).lower()
+    hits = [(_n(t), t, v) for e, t, v in pairs if " ".join(e.split()).lower() == key and t]
+    counts: dict = {}
+    for k, t, v in hits:
+        counts.setdefault(k, {"t": t, "n": 0, "v": set()})
+        counts[k]["n"] += 1
+        counts[k]["v"].add(v)
+    top = max(counts.values(), key=lambda c: c["n"]) if counts else None
+    return {
+        "n": len(hits),
+        "videos": len({v for _, _, v in hits}),
+        "top": top["t"] if top else None,
+        "top_n": top["n"] if top else 0,
+        "top_videos": len(top["v"]) if top else 0,
+    }
+
+
+def fixed_line_established(x, pairs, min_n: int = 3, min_videos: int = 2, share: float = 0.8):
+    """A fixed rendering bypasses the model for every occurrence of the line, and validation can't
+    test it (control lines never match the exact sentence) — so it must be ESTABLISHED in the
+    reviewers' corpus: rendered this way >= min_n times in >= min_videos videos and in >= share of
+    all their renderings of the line. Returns (ok, reason)."""
+    c = corpus_support(x["source"], x["lang"], pairs)
+    if c["top"] is None:
+        return False, "the reviewers' corpus never has this line"
+    if _n(c["top"]) != _n(x["target"]):
+        return False, f"reviewers mostly render it {c['top']!r} ({c['top_n']}/{c['n']})"
+    if c["top_n"] < min_n or c["top_videos"] < min_videos or c["top_n"] < share * c["n"]:
+        return False, f"not established: {c['top_n']}/{c['n']} in {c['top_videos']} video(s)"
+    return True, f"established: {c['top_n']}/{c['n']} in {c['top_videos']} videos"
 
 
 def with_lesson(glossary, x):

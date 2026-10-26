@@ -36,6 +36,7 @@ from dev_titles.glossary import load  # noqa: E402
 from dev_titles.learn import (  # noqa: E402
     LANG_NAME,
     apply_lessons,
+    fixed_line_established,
     human_better_rows,
     propose,
     reviewer_counterevidence,
@@ -170,8 +171,25 @@ def main(argv=None) -> int:
                 memo[key] = norm(txt, src)
         return memo[key]
 
+    # the reviewers' approved corpus: the TM (human parallel subtitles) + every A/B alignment we have
+    pairs = []
+    tmp = ROOT / "tm" / "tm.jsonl"
+    if tmp.exists():
+        for line in tmp.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            if r.get("lang") == a.lang:
+                pairs.append((r["source"], r["target"], r.get("video", "")))
+    for rp in sorted((ROOT.parent / "output").glob("ab*/*/vs_human/ab_rows.json")):
+        for r in json.loads(rp.read_text(encoding="utf-8")).get(a.lang, []):
+            pairs.append((r["en"], r.get("human", ""), rp.parent.parent.name))
     accepted, rejected = [], []
     for x in todo[: a.max_validate]:
+        if x["kind"] == "fixed_line":
+            ok, why = fixed_line_established(x, pairs)
+            print(f"  {'corpus OK' if ok else 'reject'} fixed_line: {_label(x)} — {why}")
+            if not ok:
+                rejected.append({**x, "validation": {"score": {"corpus": why}}})
+                continue
         if x["kind"] == "editor_example":  # examples are gated where they're used (editor pass)
             accepted.append({**x, "validation": "n/a (editor pass gates examples)"})
             continue

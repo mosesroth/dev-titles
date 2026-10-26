@@ -433,15 +433,9 @@ terms:
 style:
   ja:
     register: teineigo        # です・ます (敬体) throughout — never plain form
-    # A WHOLE sentence that is exactly one of these gets this rendering, no model call (ahead of
-    # a TM exact match). For bare replies where the prompt rule alone didn't hold.
-    fixed_lines:
-      "Sure.": "はい"
-      "Yeah, sure.": "はい"
-      "Sure, yeah.": "はい"
-      # "So thanks for…" closes the conversation (an opening thanks has no "So") — past tense, ご参加
-      "So thanks for joining today.": "本日はご参加いただきありがとうございました"
-      "So thanks for joining.": "本日はご参加いただきありがとうございました"
+    # fixed_lines (exact-sentence renderings that bypass the model) are deliberately EMPTY: conversational
+    # lines depend on who is speaking to whom; their renderings live in the context-aware notes. A fixed
+    # line needs the reviewers' own finals to translate that exact line the same way >= 3x in >= 2 videos.
     # Interviews / conversations only (applied when the run is conversational, before `notes`).
     notes_conversational: >-
       SPOKEN REGISTER (interviews / conversations — overrides any presentation-register rule below):
