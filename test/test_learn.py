@@ -150,3 +150,22 @@ def test_reviewer_counterevidence(tmp_path):
     assert reviewer_counterevidence(x, tmp_path, skip="SkipMe") == [
         "Other: 'サイドプロジェクト' x1"
     ]
+
+
+def test_fixed_line_needs_an_established_corpus_rendering():
+    from dev_titles.learn import fixed_line_established
+
+    x = {
+        "kind": "fixed_line",
+        "lang": "ja",
+        "source": "Thank you.",
+        "target": "ありがとうございました",
+    }
+    varied = [
+        ("Thank you.", "ありがとうございました", "a"),
+        ("Thank you.", "ご視聴ありがとうございました", "b"),
+    ]
+    assert not fixed_line_established(x, varied)[0]
+    steady = [("Thank you.", "ありがとうございました", v) for v in "aabb"]
+    assert fixed_line_established(x, steady)[0]
+    assert not fixed_line_established({**x, "source": "Sure."}, steady)[0]  # never in the corpus
