@@ -6,6 +6,13 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 ## [Unreleased]
 
 ### Added
+- **Supervised improvement agent**, `scripts/agent/run_improver.sh` plus the `harness-improver` skill. Runs a
+  headless Claude Code session in a git worktree on an `agent/<date>` branch. It finds the biggest recurring gap
+  in the A/B and learn reports, makes ONE change, runs lint and tests, spot-tests the change, and commits a report.
+  It never pushes or merges, and `scripts/agent/guard.py` restores any deliverable it touches.
+- **`scripts/eval/spot_ab.py`:** a spot A/B in minutes. It re-translates the lines where the human was
+  better plus random control lines, with baseline vs candidate code, and the judges compare them using
+  the human line as reference.
 - **Learn from a human review** (`learn.py`, `scripts/learn_from_review.py`). Keeps only the reviewer's
   edits that both blind judges prefer, and turns them into lessons: glossary terms, style notes,
   fixed lines, editor examples. Each lesson is validated with vs without, on its evidence, on
