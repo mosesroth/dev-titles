@@ -6,6 +6,11 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 ## [Unreleased]
 
 ### Added
+- **`scripts/check_channel.py`:** after an upload round, audits the LIVE YouTube tracks against the masters.
+  It flags a wrong language code, tracks that exist only live, and masters that are better than what's live.
+- **`deliver.write_deliverable`:** the one guarded write path for repairs. It refuses a silent text change
+  and any validation error, and writes the srt/vtt twins and the library copy together.
+- **`empty_cue` validation rule.**
 - **Supervised improvement agent**, `scripts/agent/run_improver.sh` plus the `harness-improver` skill. Runs a
   headless Claude Code session in a git worktree on an `agent/<date>` branch. It finds the biggest recurring gap
   in the A/B and learn reports, makes ONE change, runs lint and tests, spot-tests the change, and commits a report.
