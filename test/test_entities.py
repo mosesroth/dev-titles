@@ -37,7 +37,7 @@ def test_apply_policy_keeps_companies_latin_and_unifies_product_renderings():
     assert vv["renderings"]["zh-Hans"]["concierge"]  # input not mutated
 
 
-def test_names_policy_filters_amazon_brands_and_caches(tmp_path):
+def test_names_policy_filters_own_brands_and_caches(tmp_path):
     from dev_titles.entities import names_policy
 
     calls = []
