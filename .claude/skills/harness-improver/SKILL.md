@@ -32,8 +32,13 @@ A person reviews your branch and report; you never merge, push, or write deliver
    `PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider -o addopts="" test`. All must pass.
 5. **Spot A/B** against the baseline snapshot given in the prompt:
    `PYTHONPATH=src python3 scripts/eval/spot_ab.py --runs <panel runs> --baseline <baseline root>
-   --candidate . --out $DEV_TITLES_OUTPUT/agent/<date>/spot_ab [--lang <l>]`.
-   PROMISING = target wins exceed losses by >= 2, controls not net-worse beyond noise. Read the
+   --candidate . --samples 3 --cache-dir $DEV_TITLES_OUTPUT/agent/<date>/spot_cache
+   --out $DEV_TITLES_OUTPUT/agent/<date>/spot_ab [--lang <l>]`. Always --samples 3: with one translation per
+   line, the baseline judged against ITSELF swings 3-4 lines (2026-10-26). If the change touches
+   the native-editor or reply prompts (editor.py), add --editor: without it the spot A/B runs the
+   translate step only and cannot see an editor change.
+   PROMISING = target wins beat losses in a sign test (p < 0.1) and the controls show no
+   significant harm — the script computes both; report the p-values. Read the
    control LOSSES anyway — a real side effect there is your next finding. If NOT PROMISING, you may revise once
    and re-run; then stop.
 6. **Commit** on the branch (`git add -A && git commit`), message: the mechanism, the change, the

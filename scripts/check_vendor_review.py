@@ -198,6 +198,12 @@ def main():
         if not ours_p.exists() or not en_p.exists():
             report.append(f"## {v}\n\nSKIPPED: missing {ours_p if not ours_p.exists() else en_p}\n")
             continue
+        # keep the exact draft this batch reviewed: it is the ground truth for the judge calibration and
+        # the vendor-edit KPI (scripts/eval/review_pairs.py), and FINAL_SUBTITLES gets replaced
+        keep = Path(a.ours_dir).parent / "review_drafts" / Path(a.reviewed_dir).name / ours_p.name
+        if not keep.exists():
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            keep.write_bytes(ours_p.read_bytes())
         ours, en = _read_any(str(ours_p), lang).cues, _read_any(str(en_p), "en").cues
         same = len(ours) == len(rev) and all(
             abs(x.start - y.start) < 0.05 for x, y in zip(ours, rev)
@@ -238,7 +244,7 @@ def main():
             if c["applied"]:
                 ok.append(c)
                 rev[k - 1].lines = [c["fix"]]
-        sync = sync_report(rev, en.cues)
+        sync = sync_report(rev, getattr(en, "cues", en))
         state[v] = {
             "sync": sync,
             "cues": len(rev),
