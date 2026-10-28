@@ -437,6 +437,17 @@ def _replace_form(text: str, form: str, replacement: str) -> str:
     return "".join(out)
 
 
+def glossary_dir() -> Path:
+    """The folder holding the glossary IN USE and its companions (partners.yaml,
+    editor_examples.<lang>.jsonl). Set from the CLI's --glossary (SUBTITLE_GLOSSARY_DIR), so a run on
+    a code snapshot with `--glossary <snapshot>/glossary/glossary.yaml` reads AND writes the
+    snapshot's copies. Before 2026-10-27 these were hard-coded to ./glossary: every A/B run read the
+    live repo's editor examples and wrote partner lookups into the live partners.yaml."""
+    import os
+
+    return Path(os.environ.get("SUBTITLE_GLOSSARY_DIR", "glossary"))
+
+
 def load(path: str | Path) -> Glossary:
     if yaml is None:
         raise RuntimeError("PyYAML is required: pip install pyyaml")

@@ -79,3 +79,31 @@ def test_zh_line_end_punct_is_an_error():
 def test_empty_cue_is_an_error():
     sub = Subtitle("en", [Cue(0.0, 2.0, ["Hello."]), Cue(2.0, 4.0, [""])])
     assert ("empty_cue", "error") in {(v.rule, v.severity) for v in validate_subtitle(sub)}
+
+
+def test_model_commentary_is_an_error_and_edit_fix_drops_it():
+    from dev_titles.config import spec_for
+    from dev_titles.localize import model_line
+    from dev_titles.model import Cue
+    from dev_titles.validate.rules import validate_cue
+
+    bad = Cue(0, 2, ["企業はどこもFuel iXを使っているんですか **Changes made:** - 製品"])
+    assert any(v.rule == "model_commentary" for v in validate_cue(bad, spec_for("ja")))
+    ok = Cue(0, 2, ["企業はどこもFuel iXを使っているんですか"])
+    assert not any(v.rule == "model_commentary" for v in validate_cue(ok, spec_for("ja")))
+    reply = "企業はどこもFuel iXを使って\n\n**Changes made:**\n- **They all:** …"
+    assert model_line(reply, "OLD") == "企業はどこもFuel iXを使って"
+    assert model_line("**Changes made:** x", "OLD") == "OLD"
+
+
+def test_zh_plural_you_is_nimen():
+    from dev_titles.config import spec_for
+    from dev_titles.localize import _normalizer
+    from dev_titles.model import Cue
+    from dev_titles.validate.rules import validate_cue
+
+    assert "你们" in _normalizer("zh-Hans")("您们对AI的投入")
+    assert any(
+        v.rule == "zh_plural_you"
+        for v in validate_cue(Cue(0, 2, ["您们对AI的投入"]), spec_for("zh-Hans"))
+    )

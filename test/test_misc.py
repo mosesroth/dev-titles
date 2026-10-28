@@ -759,6 +759,40 @@ def test_en_autofix_applies_clear_holds_judgment():
     assert "Chile" in details and "iX" in details
 
 
+def test_en_autofix_rewraps_a_long_corrected_cue():
+    """A corrected cue is re-wrapped to two lines within max_cpl, not written as one long line
+    (one video: the EN gate then blocked the run on a 73-char line)."""
+    from dev_titles.transcribe_qe import en_autofix
+
+    en = Subtitle(
+        "en",
+        [
+            Cue(
+                0.0,
+                4.0,
+                [
+                    "React Native Windows, maybe React Native Web",
+                    "or React Native Strict DOM, come up",
+                ],
+            )
+        ],
+    )
+    findings = [
+        {
+            "ts": "00:00",
+            "kind": "en-terminology",
+            "detail": "[cue 0] 'React Native Strict DOM' -> 'React Strict DOM'",
+        }
+    ]
+    fixed = "React Native Windows, maybe React Native Web or React Strict DOM, come up"
+    new_en, applied, _ = en_autofix(
+        en, findings, lambda p: '[{"i": 0, "verdict": "clear", "new_text": "%s"}]' % fixed
+    )
+    assert applied and len(new_en.cues[0].lines) == 2
+    assert all(len(ln) <= 42 for ln in new_en.cues[0].lines)
+    assert " ".join(new_en.cues[0].lines) == fixed
+
+
 def test_dnt_survival_marks_moved_vs_garbled():
     # A keep-Latin term missing from its aligned cue but present ELSEWHERE in the target merely
     # moved on re-segmentation (survived=True); one absent from the whole target is garbled (False).

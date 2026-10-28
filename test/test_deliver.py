@@ -34,7 +34,8 @@ def test_writes_both_twins_and_the_library_copy_and_backs_up(tmp_path):
         GOOD, tmp_path / "up" / "V.en.srt", also=[lib / "V.en.srt"], backup_dir=tmp_path / "bk"
     )
     assert len(out) == 4 and (tmp_path / "up" / "V.en.vtt").exists() and (lib / "V.en.vtt").exists()
-    assert (tmp_path / "bk" / "lib_V.en.srt").read_text(encoding="utf-8") == "old"
+    (b,) = (tmp_path / "bk").glob("lib_*_V.en.srt")
+    assert b.read_text(encoding="utf-8") == "old"
 
 
 def test_ignore_rules_is_explicit(tmp_path):

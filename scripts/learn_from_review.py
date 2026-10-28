@@ -147,8 +147,8 @@ def main(argv=None) -> int:
     norm = _normalizer(a.lang, True)
     memo: dict = {}
 
-    def translate(g, r):
-        key = (id(g), r["i"])
+    def translate(g, r, sample=0):
+        key = (id(g), r["i"], sample)  # each sample is its own translation (validate judges s vs s)
         if key not in memo:
             gg, dnt = effective_glossary(g or g0, vv if r["i"] >= 0 else None, True, lang=a.lang)
             src = sents[r["i"]].text if r["i"] >= 0 else r["en"]

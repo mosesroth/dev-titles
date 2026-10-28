@@ -41,8 +41,10 @@ Flag ONLY lines a native viewer would notice as machine-made or wrong:
 - awkward word order, run-on sentences, list items without separators;
 - a meaning misread in context (tech-industry jargon, tag questions like "…, right?", negation, sarcasm);
 - the wrong SPEAKER or addressee: when the English is tagged [speaker], a reply or reaction from
-  the other person must read as theirs ("Thank you for having me" from a guest -> ja こちらこそ…,
-  zh 也谢谢您的邀请), and "you" said to one guest is that person, not the audience;
+  the other person must read as theirs ("Thank you for having me" from a guest is a reply: zh
+  感谢您的邀请 already reads as one — no 也; in ja do NOT add or remove こちらこそ here, it depends on
+  whether this is the opening or the closing, which the reply check decides), and "you" said to one
+  guest is that person, not the audience;
 - ADDED material the English doesn't have: a filler (ja ええ, zh 嗯) where the speaker said nothing like it,
   an "also" (ja も, zh 也) the English lacks, or an explicit noun for "it / them" when the previous line
   already names it — remove it;
@@ -103,8 +105,14 @@ def guard_ok(old: str, new: str, max_growth: float = 1.15, slack: int = 3) -> bo
     return True
 
 
-def load_examples(lang: str, path_tpl: str = "glossary/editor_examples.{lang}.jsonl", k: int = 12):
-    p = Path(path_tpl.format(lang=lang))
+def load_examples(lang: str, path_tpl: str | None = None, k: int = 12):
+    from .glossary import glossary_dir
+
+    p = (
+        Path(path_tpl.format(lang=lang))
+        if path_tpl
+        else glossary_dir() / f"editor_examples.{lang}.jsonl"
+    )
     if not p.exists():
         return []
     rows = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -419,7 +427,11 @@ VIDEO BRIEF: {brief}
 For the >> lines only, flag a line whose {L} does not read as THAT person replying to what was just
 said, and give a minimal rewrite. Typical problems:
 - reciprocal thanks rendered as fresh thanks: after the host thanks the guest, "Thank you for having
-  me" / "Thanks for having me" is a reply (ja こちらこそ…ありがとうございました, zh 也谢谢您的邀请);
+  me" / "Thanks for having me" is a reply (ja: in a CLOSING block こちらこそありがとうございました;
+  in an OPENING block お招きいただきありがとうございます, not こちらこそ — the ja reviewed finals of
+  8 videos do this in 7;
+  zh 感谢您的邀请 already reads as one — no 也: the zh human finals of 6 videos say 感谢您的邀请,
+  none 也谢谢您的邀请);
 - a one-word reaction used as a reply rendered literally: "Brilliant." / "Cheers." / "Great." / "Sure." /
   "Absolutely." answering thanks or a request means thanks / agreement / of course, not the adjective
   (ja 素晴らしいです for a reply "Brilliant." is wrong; ありがとうございます / ええ / もちろんです);
@@ -487,7 +499,7 @@ def reply_edit(
     seed=31,
 ):
     """Turn-boundary editor: at each speaker change, check that the new speaker's first lines read
-    as a reply to the previous speaker (こちらこそ for reciprocal thanks, a reply "Brilliant." is not
+    as a reply to the previous speaker (こちらこそ for reciprocal thanks at a closing, a reply "Brilliant." is not
     素晴らしい). Sentence-by-sentence translation and the general editor miss this (A/B 2026-10-20).
     Suggestions go through the same measured gate as native_edit. Returns the set of changed indices.
     """
@@ -541,7 +553,12 @@ def reply_edit(
         part = todo[k : k + per_call]
         blocks, allowed = [], {}
         for n, i in enumerate(part, 1):
-            lines = [f"BLOCK {n}"]
+            # where the turn falls: an opening and a closing "Thanks for having me" both follow the
+            # host's thanks and read alike in a ±2-line window, but ja reviewers write them
+            # differently (7 of 8 videos) — the model can't tell them apart without this
+            pos = i / max(len(speakers), 1)
+            where = "OPENING" if pos < 0.15 else "CLOSING" if pos > 0.85 else "MIDDLE"
+            lines = [f"BLOCK {n} ({where} of the video)"]
             for j in range(i - window, i + window):
                 if j not in by_i:
                     continue

@@ -147,3 +147,48 @@ def test_company_local_name_only_when_the_site_brands_itself_that_way():
         None,
         None,
     )  # Latin 3x vs local 1x -> stays Latin
+
+
+def test_named_concepts_stay_latin_in_every_language():
+    from dev_titles.entities import apply_policy
+
+    vv = apply_policy(
+        {"renderings": {"zh-Hans": {"Universal React": {"canonical": "通用React"}}}},
+        {"companies": [], "ordinary_products": [], "named_concepts": ["Universal React"]},
+    )
+    for lang in ("ja", "zh-Hans"):
+        assert vv["renderings"][lang]["Universal React"] == {"canonical": "Universal React"}
+
+
+def test_mixed_latin_names_finds_a_name_kept_latin_only_sometimes():
+    from types import SimpleNamespace as R
+
+    from dev_titles.localize import mixed_latin_names
+
+    recs = [
+        R(
+            i=0,
+            src="Today I want to talk about Universal React.",
+            txt="本日はユニバーサルReactについて",
+        ),
+        R(i=1, src="So Universal React means a lot.", txt="Universal Reactは大事です"),
+        R(i=2, src="Content Launcher is great.", txt="コンテンツランチャー"),
+        R(i=3, src="We use Content Launcher here.", txt="Content Launcherを使う"),
+    ]
+    got = mixed_latin_names(recs, exclude=["Content Launcher"])
+    assert got == {"Universal React": [0]}  # "So" is stripped; a glossary-translated name is exempt
+
+
+def test_companion_files_follow_the_glossary_in_use(tmp_path, monkeypatch):
+    """partners.yaml / editor examples resolve beside the glossary in use, so an A/B run on a snapshot
+    reads and writes the snapshot's copies, never the live repo's."""
+    from dev_titles import editor, entities
+
+    monkeypatch.setenv("SUBTITLE_GLOSSARY_DIR", str(tmp_path))
+    (tmp_path / "editor_examples.ja.jsonl").write_text(
+        '{"video": "v", "en": "a", "before": "b", "after": "c"}\n'
+    )
+    assert editor.load_examples("ja")[0]["after"] == "c"
+    entities.save_partners({"Acme": {"name": None}})
+    assert (tmp_path / "partners.yaml").exists()
+    assert "Acme" in entities.load_partners()

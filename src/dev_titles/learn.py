@@ -12,8 +12,9 @@ evidence before adopting it — as a job:
      note, a fixed rendering for a whole short line, an editor example — or nothing (a one-off);
   4. lessons that duplicate or contradict the glossary are set aside for a person;
   5. each remaining glossary / style / fixed-line lesson is VALIDATED: its evidence sentences, plus
-     unrelated control sentences, are re-translated with and without it; it is accepted only if the
-     evidence moves toward the reviewer and no control gets worse (blind judges again);
+     unrelated control sentences, are re-translated with and without it, 3 times each; it is
+     accepted only if the evidence wins in a sign test and the controls show no significant harm
+     (blind judges again);
   6. accepted lessons are written into glossary.yaml / editor_examples.<lang>.jsonl (text insertion,
      comments kept) by apply_lessons — the caller commits; a person reviews the commit.
 """
@@ -298,11 +299,29 @@ def with_lesson(glossary, x):
     return g
 
 
-def validate(x, translate, judges, rows, *, n_controls: int = 3, seed: int = 0) -> dict:
-    """Re-translate the lesson's evidence (and `n_controls` unrelated rows) with and without it.
-    `translate(glossary_or_None, row) -> text` (None = the current glossary). Accepted when, on the
-    evidence, the version WITH the lesson beats the one without at least as often as it loses AND
-    wins at least once; and on no control does the version without win both votes."""
+def sign_p(wins: int, losses: int) -> float:
+    """One-sided exact sign test: P(>= wins of wins+losses | p = 0.5)."""
+    import math
+
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    return sum(math.comb(n, k) for k in range(wins, n + 1)) / 2**n
+
+
+def validate(
+    x, translate, judges, rows, *, n_controls: int = 3, seed: int = 0, samples: int = 3, alpha=0.1
+) -> dict:
+    """Re-translate the lesson's evidence (and `n_controls` unrelated rows) with and without it,
+    `samples` times each. `translate(glossary_or_None, row, sample) -> text` (None = the current
+    glossary). Sample s with the lesson is judged against sample s without it (both judges, random
+    order); a comparison counts as a win/loss only when both judges agree.
+
+    Accepted when the evidence wins beat its losses in a sign test (p < alpha) and the controls show
+    no significant harm (the sign test the other way not < alpha). Why: one translation per row is
+    noise — a baseline judged against ITSELF swings 3-4 lines (spot A/B, 2026-10-26) — and the old
+    rule accepted a lesson on a single winning line. A lesson with one evidence row now needs all of
+    its samples to win AND more evidence (glossary terms bring rows from other videos)."""
     rng = random.Random(seed)
     L = LANG_NAME.get(x["lang"], x["lang"])
     ev = (x["evidence"] + x.get("extra_evidence", []))[:6]
@@ -312,34 +331,45 @@ def validate(x, translate, judges, rows, *, n_controls: int = 3, seed: int = 0) 
     g = x["_glossary"]
     res: dict = {"evidence": [], "controls": []}
     items_all = ev + controls
+    jobs = [(r, s_) for s_ in range(samples) for r in items_all]
     with ThreadPoolExecutor(6) as ex:  # the translations are independent model calls
-        news = list(ex.map(lambda r: translate(g, r), items_all))
-        olds = list(ex.map(lambda r: translate(None, r), items_all))
-    done = {r["i"]: (n_, o_) for r, n_, o_ in zip(items_all, news, olds)}
+        news = list(ex.map(lambda rs: translate(g, rs[0], rs[1]), jobs))
+        olds = list(ex.map(lambda rs: translate(None, rs[0], rs[1]), jobs))
+    done: dict = {}
+    for (r, s_), n_, o_ in zip(jobs, news, olds):
+        done.setdefault(r["i"], []).append((n_, o_))
+    tally = {"evidence": [0, 0], "controls": [0, 0]}
     for bucket, items in (("evidence", ev), ("controls", controls)):
         for r in items:
             k = r["i"]
             here = 0 <= k < len(rows)  # cross-video evidence (k < 0) has no neighbours here
             prev = rows[k - 1]["en"] if here and k else ""
             nxt = rows[k + 1]["en"] if here and k + 1 < len(rows) else ""
-            new, old = done[k]
-            if _n(new) == _n(old):
-                res[bucket].append({"i": k, "same": True})
-                continue
-            v = pairwise(judges, L, r["en"], prev, nxt, new, old, rng)
-            res[bucket].append({"i": k, "with": new, "without": old, "votes": v})
-    wins = sum(
-        1 for e in res["evidence"] if e.get("votes") and e["votes"].count("x") == len(e["votes"])
-    )
-    losses = sum(
-        1 for e in res["evidence"] if e.get("votes") and e["votes"].count("y") == len(e["votes"])
-    )
-    harmed = [
-        c for c in res["controls"] if c.get("votes") and c["votes"].count("y") == len(c["votes"])
-    ]
-    need = 2 if x["kind"] == "glossary_term" and len(ev) >= 2 else 1  # a term applies everywhere
-    res["accepted"] = wins >= need and wins >= losses and not harmed
-    res["score"] = {"wins": wins, "losses": losses, "controls_harmed": len(harmed)}
+            xs = ys = 0
+            pairs: list[dict] = []
+            for new, old in done[k]:
+                if _n(new) == _n(old):
+                    pairs.append({"same": True})
+                    continue
+                v = pairwise(judges, L, r["en"], prev, nxt, new, old, rng)
+                xs += v.count("x") == len(v)
+                ys += v.count("y") == len(v)
+                pairs.append({"with": new, "without": old, "votes": v})
+            tally[bucket][0] += xs
+            tally[bucket][1] += ys
+            res[bucket].append({"i": k, "wins": xs, "losses": ys, "samples": pairs})
+    (w, l_), (cw, cl) = tally["evidence"], tally["controls"]
+    p_ev, p_harm = sign_p(w, l_), sign_p(cl, cw)
+    res["accepted"] = p_ev < alpha and p_harm >= alpha
+    res["score"] = {
+        "wins": w,
+        "losses": l_,
+        "p": round(p_ev, 3),
+        "control_wins": cw,
+        "control_losses": cl,
+        "p_controls_worse": round(p_harm, 3),
+        "samples": samples,
+    }
     return res
 
 

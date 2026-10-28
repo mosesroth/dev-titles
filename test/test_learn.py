@@ -62,11 +62,19 @@ def test_validate_accepts_only_when_evidence_improves_and_controls_hold():
         "_glossary": object(),
     }
     judge_new = lambda p: '{"better": "A"}' if "A: NEW" in p else '{"better": "B"}'  # noqa: E731
-    tr = lambda g, r: "NEW" if g is not None and r["i"] == 0 else f"old{r['i']}"  # noqa: E731
-    assert validate(x, tr, [judge_new, judge_new], rows)["accepted"]
-    tr_harm = lambda g, r: "NEW" if g is not None else "OLD"  # noqa: E731  (changes controls too)
+    tr = lambda g, r, s=0: "NEW" if g is not None and r["i"] == 0 else f"old{r['i']}"  # noqa: E731
+    # one evidence row: 3 samples winning 3-0 is p = 0.125 -> not enough on its own
+    assert not validate(x, tr, [judge_new, judge_new], rows)["accepted"]
+    x2 = {**x, "evidence": [rows[0], rows[1]]}
+    tr2 = lambda g, r, s=0: (
+        "NEW" if g is not None and r["i"] in (0, 1) else f"old{r['i']}"
+    )  # noqa: E731
+    assert validate(x2, tr2, [judge_new, judge_new], rows)["accepted"]  # 6-0: p = 0.016
+    tr_harm = lambda g, r, s=0: (
+        "NEW" if g is not None else "OLD"
+    )  # noqa: E731  (changes controls too)
     judge_old = lambda p: '{"better": "A"}' if "A: OLD" in p else '{"better": "B"}'  # noqa: E731
-    assert not validate(x, tr_harm, [judge_old, judge_old], rows, seed=random.randint(0, 9))[
+    assert not validate(x2, tr_harm, [judge_old, judge_old], rows, seed=random.randint(0, 9))[
         "accepted"
     ]
 

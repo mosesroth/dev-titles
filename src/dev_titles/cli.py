@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1673,6 +1674,10 @@ def main(argv=None) -> int:
     from . import llm
 
     llm.configure(args.llm, args.llm_model)
+    if getattr(
+        args, "glossary", None
+    ):  # partners.yaml / editor examples live beside the glossary in use
+        os.environ["SUBTITLE_GLOSSARY_DIR"] = str(Path(args.glossary).parent)
     return args.func(args)
 
 

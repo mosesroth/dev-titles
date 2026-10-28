@@ -188,6 +188,9 @@ def _zh_polite_you(text: str) -> str:
     """你 -> 您 except the plural 你们 (您们 is not idiomatic; the reviewers kept 你们)."""
     import re as _re
 
+    # 您们 -> 你们: the model sometimes writes the plural with 您 itself; reviewers changed it 3 of 3
+    # times in 3 videos (cross-video mining, 2026-10-27)
+    text = text.replace("您们", "你们")
     return _re.sub(r"(?<![迷])你(?!们)(?!好(?=[，,。！!？?」』\s]|$))", "您", text)
 
 
@@ -247,7 +250,20 @@ def edit_fix(invoke, src: str, cur: str, miss: str, tgt_lang_name: str) -> str:
         f"ENGLISH SOURCE: {_src}\n\nCURRENT {tgt_lang_name} (incomplete): {_cur}\n\n"
         f"MISSING CONTENT to add: {_miss}"
     ).strip()
-    return _unmask(out, mask)
+    return _unmask(model_line(out, cur), mask)
+
+
+def model_line(out: str, fallback: str) -> str:
+    """The subtitle line in a raw model reply, or `fallback` when the reply is not one: the first
+    paragraph only, and none of the model's own commentary (markdown, "Changes made:"). A repair
+    call returned its explanation with the line and it reached the output (spot A/B, one ja video,
+    2026-10-27)."""
+    from .validate.rules import _COMMENTARY
+
+    first = re.split(r"\n\s*\n", (out or "").strip(), maxsplit=1)[0].strip()
+    if not first or _COMMENTARY.search(first):
+        return fallback
+    return first
 
 
 def _with_brief(transcript: str, video_vocab: dict | None) -> str:
@@ -1287,6 +1303,7 @@ def _localize_en_impl(
 
             # the final, post-repair panel, so the NEXT run can re-review incrementally
             save_qe_state(L.qe_state_path, L.records, L.dqf, L.suspects)
+        _latin_name_consistency(run, L)
         _dnt_autocorrect(run, L)
         outputs.append(_finalize_lang(run, L))
     _write_status(cache_path, phase="complete")
@@ -1388,10 +1405,10 @@ def _apply_names_policy(run: _Run, brief: str) -> None:
             )
         except Exception as e:
             run.logger(f"official-name lookup skipped ({type(e).__name__})")
-    if pol.get("companies") or pol.get("ordinary_products"):
+    if pol.get("companies") or pol.get("ordinary_products") or pol.get("named_concepts"):
         run.video_vocab = apply_policy(run.video_vocab, pol, run.langs)
         run.logger(
-            f"names policy: keep Latin {pol.get('companies')}; translate "
+            f"names policy: keep Latin {pol.get('companies')} + {pol.get('named_concepts') or []}; translate "
             f"{[(x.get('name'), x.get('ja'), x.get('zh-Hans')) for x in pol.get('ordinary_products', [])]}"
         )
 
@@ -1835,6 +1852,120 @@ def _term_pin_pass(run: _Run, L: _LangRun) -> None:
             f"{L.lang}: term-pin auto-repair — {len(pins)} pin(s) across "
             f"{len(changed2)} cue(s) re-judged; {len(resolved)} critique(s) resolved"
         )
+
+
+def mixed_latin_names(records, exclude=()) -> dict[str, list[int]]:
+    """Capitalized multi-word EN names (Universal React, React Strict DOM) that the track keeps in
+    Latin in SOME sentences and not in others: {name: [record index without it]}. Reviewers keep
+    such a name one way per video — Latin, 8/8 in both languages on one video — while a run left
+    to the translator mixed Latin with ユニバーサルReact. `exclude`: names a rendering is pinned for
+    (glossary / ordinary-word products), which are SUPPOSED to be translated."""
+    from .latin_names import names_in
+
+    ex = {e.lower() for e in exclude}
+    names = {n for r in records for n in names_in(r.src)}
+    out = {}
+    for name in sorted(names):
+        if name.lower() in ex:
+            continue
+        with_ = [r for r in records if name in (r.src or "")]
+        kept = [r for r in with_ if name in (r.txt or "")]
+        lost = [r.i for r in with_ if name not in (r.txt or "")]
+        if kept and lost:
+            out[name] = lost
+    return out
+
+
+def _latin_name_consistency(run: _Run, L: _LangRun) -> None:
+    """Capitalized names the track translates (everywhere, or in some sentences only) but that should
+    stay Latin — the reviewers' corpus or the classifier says so (latin_names) — are restored in
+    Latin by re-translating the sentences that lost them. A re-translation is kept only if it
+    restores the name AND neither judge finds the sentence worse than before: names the reviewers
+    translate (a service or company name they localize) must not be forced into Latin at the sentence's expense.
+    Every name restored is listed in the review (kind 'latin-name-restored') so a reviewer can
+    overrule it — and their edit then decides the name for later videos (it enters the corpus)."""
+    import random
+
+    from . import latin_names as ln
+    from .learn import pairwise
+
+    g, _ = effective_glossary(run.glossary, run.video_vocab, run.conversational, lang=L.lang)
+    pinned = [
+        t.source
+        for t in g.terms
+        if (t.translations.get(L.lang) or "").strip() and t.translations[L.lang] != t.source
+    ]
+    mixed = mixed_latin_names(L.records, exclude=pinned)
+    never = [n for n in ln.never_latin(L.records, exclude=pinned) if n not in mixed]
+    src_of: dict[str, str] = {n: "track keeps it Latin elsewhere" for n in mixed}
+    if never:
+        lines = {n: next((r.src for r in L.records if n in (r.src or "")), "") for n in never}
+        how: dict[str, str] = {}
+        try:
+            verdict = ln.decide(
+                never,
+                L.lang,
+                _LANG_NAME.get(L.lang, L.lang),
+                ln.load_corpus(L.lang),
+                run.qe_invoke,
+                brief=(run.video_vocab or {}).get("brief", ""),
+                lines=lines,
+                sources=how,
+            )
+        except Exception as e:  # never sink a run on it
+            run.logger(f"{L.lang}: Latin-name check skipped ({type(e).__name__})")
+            verdict = {}
+        for n in never:
+            if verdict.get(n) == "latin":
+                src_of[n] = "reviewers keep it Latin" if how.get(n) == "corpus" else "model: a name"
+    if not src_of or run.qe_invoke is None:
+        return
+    rt = make_retranslate(
+        run.en,
+        run.translator,
+        run.glossary,
+        L.lang,
+        exemplar_bank=L.bank,
+        video_vocab=run.video_vocab,
+        invoke=run.qe_invoke,
+        backcheck=run.backcheck,
+        conversational=run.conversational,
+    )
+    judges = [j for j in (run.qe_invoke, run.qe_second_judge) if j]
+    lname = _LANG_NAME.get(L.lang, L.lang)
+    by_i = {r.i: r for r in L.records}
+    rng = random.Random(0)
+    for name, why in src_of.items():
+        kept = rejected = 0
+        for r in [r for r in L.records if name in (r.src or "") and name not in (r.txt or "")]:
+            nt = (rt(r, f"Keep verbatim in Latin, do NOT translate: {name}") or "").strip()
+            if not nt or name not in nt:
+                rejected += 1
+                continue
+            prev = by_i[r.i - 1].src if r.i - 1 in by_i else ""
+            nxt = by_i[r.i + 1].src if r.i + 1 in by_i else ""
+            votes = pairwise(judges, lname, r.src, prev, nxt, nt, r.txt, rng)
+            if "y" in votes:  # a judge prefers the sentence as it was
+                rejected += 1
+                continue
+            r.txt = nt
+            kept += 1
+        if kept:
+            run.logger(
+                f"{L.lang}: kept {name!r} Latin ({why}) in {kept} sentence(s)"
+                + (f"; {rejected} left as translated (not better)" if rejected else "")
+            )
+            L.suspects.append(
+                {
+                    "kind": "latin-name-restored",
+                    "ts": "",
+                    "detail": f"{name!r} restored in Latin in {kept} sentence(s) ({why})"
+                    + (f"; {rejected} sentence(s) left translated" if rejected else "")
+                    + " — translate it here if the reviewers would",
+                }
+            )
+        elif rejected:
+            run.logger(f"{L.lang}: {name!r} left translated — Latin re-translation not better")
 
 
 def _dnt_autocorrect(run: _Run, L: _LangRun) -> None:

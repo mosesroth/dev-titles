@@ -72,9 +72,11 @@ def write_deliverable(
     )
     written = []
     for t in targets:
-        if t.exists():
+        if (
+            t.exists()
+        ):  # every version kept: a second repair the same day must not overwrite the first backup
             bk.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(t, bk / f"{t.parent.name}_{t.name}")
+            shutil.copy2(t, bk / f"{t.parent.name}_{time.strftime('%H%M%S')}_{t.name}")
         t.parent.mkdir(parents=True, exist_ok=True)
         t.write_text(write_srt(sub) if t.suffix == ".srt" else write_vtt(sub), encoding="utf-8")
         written.append(str(t))

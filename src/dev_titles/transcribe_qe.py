@@ -580,7 +580,13 @@ def en_autofix(en, findings: list[dict], invoke) -> tuple:
             and new_text.strip()
             and new_text.strip() != " ".join(en.cues[ci].lines).strip()
         ):
-            cues[ci] = Cue(start=en.cues[ci].start, end=en.cues[ci].end, lines=[new_text.strip()])
+            # re-wrapped: a corrected cue written as one line broke max_cpl and the EN gate blocked the
+            # run (one video, 2026-10-26, 73- and 78-char lines)
+            from .en_cleanread import wrap2
+
+            cues[ci] = Cue(
+                start=en.cues[ci].start, end=en.cues[ci].end, lines=wrap2(new_text.strip())
+            )
             applied.append({**f, "new_text": new_text.strip()})
         else:
             held.append(f)

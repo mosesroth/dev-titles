@@ -42,6 +42,12 @@ class Violation:
     detail: str
 
 
+_COMMENTARY = re.compile(
+    r"\*\*|```|\b(?:Changes made|Explanation|Note|Rationale|Corrected (?:line|translation))\s*:",
+    re.I,
+)
+
+
 def validate_cue(cue: Cue, spec: LangSpec, conversational: bool = False) -> list[Violation]:
     v: list[Violation] = []
     idx = cue.index
@@ -136,6 +142,11 @@ def validate_cue(cue: Cue, spec: LangSpec, conversational: bool = False) -> list
         v.append(Violation(idx, "caption_artifact", "error", f"'>>' speaker marker: {text[:60]!r}"))
     elif _CJK_LAUGH.search(text):
         v.append(Violation(idx, "sound_tag", "warn", f"laughter marker in the text: {text[:60]!r}"))
+    # The MODEL'S OWN COMMENTARY in a subtitle (markdown, "Changes made:", "Note:"): a repair call
+    # returned its explanation along with the line, and it was kept (spot A/B, one ja video,
+    # 2026-10-27: "**Changes made:** - **"They all":** Changed …").
+    if _COMMENTARY.search(text):
+        v.append(Violation(idx, "model_commentary", "error", f"model commentary: {text[:60]!r}"))
 
     # CJK-specific.
     if spec.cjk:
@@ -165,6 +176,21 @@ def _validate_cjk(cue: Cue, spec: LangSpec, conversational: bool = False) -> lis
             v.append(
                 Violation(idx, "zh_line_end_punct", "error", f"line ends with {ln.rstrip()[-1]!r}")
             )
+    if spec.lang.startswith("zh") and len(cue.lines) > 1:
+        from ..segment.cjk import _word_break_positions
+
+        for a, b in zip(cue.lines, cue.lines[1:]):
+            if a and b and "\u4e00" <= a[-1] <= "\u9fff" and "\u4e00" <= b[0] <= "\u9fff":
+                ok = _word_break_positions(a[-6:] + b[:6], spec.lang)
+                if ok and len(a[-6:]) not in ok:
+                    v.append(
+                        Violation(
+                            idx,
+                            "zh_midword_break",
+                            "warn",
+                            f"line break splits a word: …{a[-3:]}|{b[:3]}…",
+                        )
+                    )
     joined = "".join(cue.lines)
     # Stray ASCII period in CJK text (not inside a Latin token like 'Next.js' / 'v1.2', not an
     # ellipsis '...'): an editing artifact — one reviewed ja file carried 8 of them
@@ -180,6 +206,8 @@ def _validate_cjk(cue: Cue, spec: LangSpec, conversational: bool = False) -> lis
         # zh second person: 您 is the house default in BOTH registers (native reviewers changed
         # our conversational 你 to 您 141:4 across four videos).
         # Only the PLURAL 你们 stays 你, since 您们 is unidiomatic.
+        if "您们" in joined:  # plural "you" is 你们; reviewers changed 您们 3 of 3 times
+            v.append(Violation(idx, "zh_plural_you", "warn", "您们 is unidiomatic; plural is 你们"))
         if re.search(r"你(?!们)", joined):
             v.append(
                 Violation(

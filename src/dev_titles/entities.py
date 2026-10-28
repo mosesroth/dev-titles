@@ -1,5 +1,5 @@
-"""NAMES POLICY per video: partner company names stay Latin; products named with ordinary words
-are translated, one rendering per video.
+"""NAMES POLICY per video: partner company names and named technologies stay Latin; products
+named with ordinary words are translated, one rendering per video.
 
 What native reviewers do: company names stay in Latin (never localized), while a partner's product
 named with an ordinary word is translated, consistently (a 'Concierge' product -> ja コンシェルジュ,
@@ -9,6 +9,10 @@ The glossary's own brands still follow the glossary.
 
 One LLM pass over the brief + transcript (cached in <out>/entities.json):
   companies:          ["Acme Air", ...]                 -> kept Latin (added to the video's names)
+  named_concepts:     ["Universal React", "React Strict DOM", ...] -> kept Latin, no official-name
+                      lookup. Reviewers keep these 8/8 in both languages (one video); left to the
+                      translator, one run wrote 通用React throughout and another mixed Latin with
+                      ユニバーサルReact in the same track (overnight paired A/B, 2026-10-27).
   ordinary_products:  [{"name": "Concierge", "ja": "コンシェルジュ", "zh-Hans": "礼宾服务"}]
                       -> one per-video rendering per language (every case variant replaced)
 """
@@ -37,10 +41,14 @@ List:
    standard local word, consistently. Give ja (standard term or katakana loanword) and zh-Hans —
    the natural FULL noun a native subtitler would write for the product (not a clipped one-word
    form that only works as a modifier).
+3. "named_concepts": capitalized names of technologies, frameworks, libraries, open-source
+   projects, protocols and named technical concepts (e.g. "Universal React", "React Strict DOM",
+   "Tailwind CSS", "Model Context Protocol"), spelled as in the transcript. These keep their Latin
+   spelling. Not ordinary words that are merely capitalized at the start of a sentence.
 Exclude: people's names; the channel owner's own products and brands (they follow the glossary);
 coined product names that are not ordinary words (e.g. Kubernetes, Figma) — those stay Latin.
 Return ONLY JSON: {{"companies": [...], "ordinary_products": [{{"name": "...", "company": "<whose product>",
-"ja": "...", "zh-Hans": "..."}}]}}"""
+"ja": "...", "zh-Hans": "..."}}], "named_concepts": [...]}}"""
 
 _OWN_BRANDS = re.compile(r"^$")  # set your own brands here; the glossary covers them otherwise
 
@@ -55,7 +63,7 @@ def _caps(text: str, n: int = 40) -> str:
 def names_policy(en_text: str, invoke, cache_path=None, brief: str = "") -> dict:
     """{'companies': [...], 'ordinary_products': [{'name', 'ja', 'zh-Hans'}]} — {} on failure."""
     key = hashlib.sha1(
-        (brief + "\x00" + en_text).encode("utf-8"), usedforsecurity=False
+        (PROMPT + "\x00" + brief + "\x00" + en_text).encode("utf-8"), usedforsecurity=False
     ).hexdigest()[:16]
     p = Path(cache_path) if cache_path else None
     if p and p.exists():
@@ -88,7 +96,16 @@ def names_policy(en_text: str, invoke, cache_path=None, brief: str = "") -> dict
         for x in pol.get("ordinary_products", [])
         if isinstance(x, dict) and x.get("name") and not _OWN_BRANDS.match(str(x["name"]))
     ]
-    pol = {"companies": companies, "ordinary_products": products}
+    product_names = {str(x["name"]).strip().lower() for x in products}
+    concepts = [
+        c.strip()
+        for c in pol.get("named_concepts", [])
+        if isinstance(c, str)
+        and c.strip()
+        and not _OWN_BRANDS.match(c.strip())
+        and c.strip().lower() not in product_names
+    ]
+    pol = {"companies": companies, "ordinary_products": products, "named_concepts": concepts}
     if p:
         p.write_text(
             json.dumps({"key": key, "policy": pol}, ensure_ascii=False, indent=1), encoding="utf-8"
@@ -106,8 +123,9 @@ def apply_policy(video_vocab: dict | None, policy: dict, langs=("ja", "zh-Hans")
     vv = json.loads(json.dumps(video_vocab or {}))  # deep copy
     companies = policy.get("companies") or []
     products = policy.get("ordinary_products") or []
+    concepts = policy.get("named_concepts") or []
     official = policy.get("company_names") or {}
-    if not companies and not products:
+    if not companies and not products and not concepts:
         return vv
     rend = vv.setdefault("renderings", {})
     for lang in set(rend) | set(langs):
@@ -117,6 +135,10 @@ def apply_policy(video_vocab: dict | None, policy: dict, langs=("ja", "zh-Hans")
                 del r[src]
             loc = ((official.get(company) or {}).get(lang) or "").strip()
             r[company] = {"canonical": loc, "avoid": [company]} if loc else {"canonical": company}
+        for name in concepts:
+            for src in [k for k in r if k.lower() == name.lower()]:
+                del r[src]
+            r[name] = {"canonical": name}
         for prod in products:
             tgt = (prod.get(lang) or "").strip()
             if not tgt:
@@ -130,7 +152,15 @@ def apply_policy(video_vocab: dict | None, policy: dict, langs=("ja", "zh-Hans")
 
 # ---- Official renderings from the partner's own website, locked in glossary/partners.yaml ----
 
-PARTNERS_PATH = "glossary/partners.yaml"
+PARTNERS_PATH = "glossary/partners.yaml"  # default only; the path in use is _partners_path()
+
+
+def _partners_path() -> Path:
+    from .glossary import glossary_dir
+
+    return glossary_dir() / "partners.yaml"
+
+
 _LANG_HINT = {
     "ja": ("日本語", "Japanese", ("/ja", "ja-jp", "/jp", "jp/", "ja_jp")),
     "zh-Hans": ("中文", "Simplified Chinese", ("/zh", "zh-cn", "/cn", "cn/", "zh_cn", "zh-hans")),
@@ -148,17 +178,17 @@ def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-def load_partners(path=PARTNERS_PATH) -> dict:
+def load_partners(path=None) -> dict:
     import yaml
 
-    p = Path(path)
+    p = Path(path) if path else _partners_path()
     if not p.exists():
         return {}
     d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     return d.get("partners", {}) or {}
 
 
-def save_partners(partners: dict, path=PARTNERS_PATH) -> None:
+def save_partners(partners: dict, path=None) -> None:
     import yaml
 
     head = (
@@ -167,7 +197,7 @@ def save_partners(partners: dict, path=PARTNERS_PATH) -> None:
         "# own localized name (null = none on its site -> Latin). Edit by hand to correct; an entry here is\n"
         "# never looked up again.\n"
     )
-    Path(path).write_text(
+    Path(path or _partners_path()).write_text(
         head + yaml.safe_dump({"partners": partners}, allow_unicode=True, sort_keys=True),
         encoding="utf-8",
     )
@@ -291,7 +321,7 @@ def resolve_official(
     web_fetch,
     invoke,
     langs=("ja", "zh-Hans"),
-    path=PARTNERS_PATH,
+    path=None,
     logger=print,
 ) -> dict:
     """Replace the policy's model-chosen product renderings with LOCKED official ones: from

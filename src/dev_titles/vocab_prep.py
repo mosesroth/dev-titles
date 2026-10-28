@@ -812,10 +812,12 @@ def reconcile_names(reliable: list[str], candidates: list[str]) -> list[str]:
     return out
 
 
-def load_name_registry(path="glossary/names.yaml") -> list[str]:
+def load_name_registry(path=None) -> list[str]:
     """Canonical person names from the channel registry (glossary/names.yaml) — hosts,
     guests, speakers harvested from video descriptions. Empty list if absent."""
-    p = Path(path)
+    from .glossary import glossary_dir
+
+    p = Path(path) if path else glossary_dir() / "names.yaml"
     if not p.exists():
         return []
     try:
