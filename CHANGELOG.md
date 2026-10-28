@@ -6,6 +6,44 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 ## [Unreleased]
 
 ### Added
+- **Technology names stay Latin.** The per-video names policy now also lists `named_concepts`
+  (frameworks, libraries, protocols, named technical concepts), which keep their Latin spelling.
+  After translation, a capitalized name the track never keeps in Latin is decided by
+  `latin_names`: the human reviewers' own majority choice in earlier reviewed videos (a video
+  never decides its own names), else a short classification call (latin / translate / fragment).
+  Sentences that lost a Latin name are re-translated, and a re-translation is kept only if no
+  judge finds the sentence worse; every restored name is listed in the review. A consistency pass
+  also unifies a name the track mixes (Latin in some lines, translated in others).
+  Leave-one-video-out agreement with the reviewers: 92% (`scripts/eval/latin_names_check.py`).
+- **zh repair scripts for delivered tracks** (both write only through `deliver.write_deliverable`):
+  `scripts/repair_zh_breaks.py` re-breaks lines that split a word and moves a word fragment split
+  across two cues to the side holding the rest of the word; `scripts/restore_zh_pauses.py` restores
+  real pauses (clause boundaries) that a re-wrap welded shut, comparing with the reviewer's file —
+  each candidate is judged by the model and only a confirmed pause gets a space.
+- **`model_commentary` validation error:** a model's own commentary inside a subtitle (markdown,
+  "Changes made:", "Note:") blocks delivery.
+- **`zh_midword_break` and `zh_plural_you` warnings.**
+- **A/B tooling.**
+  - `scripts/eval/spot_ab.py`: `--samples k` (each line translated k times per version and judged
+    sample against sample) with a sign-test verdict, since one sample per line is inside the noise;
+    `--target-re` / `--max-targets` to choose the target lines; `--cache-dir` (translations reused,
+    keyed on the code + glossary content, not the folder path); `--editor` (also runs the
+    native-editor and reply passes, so editor-prompt changes can be spot-tested); per-arm models
+    (`--baseline-model` / `--candidate-model`, or `SPOT_MODEL`). `translate_rows.py` honours
+    `SPOT_WORKERS`.
+  - `scripts/eval/paired_ab.py`: two fresh full runs of the same video judged line by line against
+    the human final, with a sign test and chrF as a second opinion.
+  - `scripts/eval/localize_arm.py`: runs one A/B arm inside its own code snapshot, fully isolated.
+- **Measuring against human reviewers.** `scripts/eval/review_pairs.py` builds sentence-aligned
+  (draft the reviewer saw, reviewer's final) pairs; `judge_calibration.py` measures how often the
+  judges prefer what the reviewers chose (dev/test split); `vendor_edit_kpi.py` reports the share of
+  lines reviewers edited per batch; `mine_term_changes.py` proposes glossary changes from word
+  changes reviewers made consistently across videos (nothing is applied automatically);
+  `pronoun_corpus.py` counts how human zh translators render it / this / that / they.
+  `check_vendor_review.py` keeps each batch's reviewed draft for these.
+  Paths: `DEV_TITLES_INPUT` (reviewed batches, default `input`), `DEV_TITLES_OUTPUT`;
+  `SUBTITLE_REVIEWED_GLOB` / `SUBTITLE_EN_DIR` override the reviewers' corpus location.
+- `scripts/--help` smoke test for every script.
 - **`scripts/check_channel.py`:** after an upload round, audits the LIVE YouTube tracks against the masters.
   It flags a wrong language code, tracks that exist only live, and masters that are better than what's live.
 - **`deliver.write_deliverable`:** the one guarded write path for repairs. It refuses a silent text change
@@ -65,12 +103,34 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
   written outside the pipeline.
 
 ### Fixed
+- **zh line breaking:** a line break never splits a word (word-safe breaks at the width cap); a comma
+  at the break is dropped instead of a word being split; no line ends on a conjunction (但, 而且…);
+  no break inside spoken endings like 也行 / 才行 / 都行; re-joining a cue's lines keeps the pause a
+  line break carried instead of welding the words together.
+- **EN autofix:** a corrected cue is re-wrapped to two lines (one long line broke the line-width
+  limit and blocked the run).
+- **Model commentary guard:** `edit_fix` keeps only the subtitle line (first paragraph, no markdown
+  or "Changes made:") — a repair reply's explanation once reached the output.
+- zh: 您们 is normalized to 你们 (plural "you").
+- Editor / reply prompts: zh "Thanks for having me" is 感谢您的邀请, without 也; ja uses
+  お招きいただき… at the opening of a video and こちらこそ… at the closing. Reply-check blocks are
+  labelled OPENING / MIDDLE / CLOSING so the model can tell the two apart, and the general editor
+  leaves こちらこそ to the reply check.
+- `check_vendor_review.py`: crash at the sync step.
+- `deliver`: a second repair on the same day no longer overwrites the first backup.
 - Translation prompts: per-line speaker / meaning notes were appended to the end of the
   whole-transcript reference block, nothing marked which line was being translated, and the
   reflect pass saw neither. They now sit beside the line in both prompts, with the two lines
   before and after it (`TranslationRequest.line_context`), so a correct note is actually followed.
 
 ### Changed
+- **Learn validation** judges each lesson on 3 samples per row with a sign test (evidence p < 0.1 and
+  no significant harm on controls); a single translation per row was inside the noise.
+- **A/B arms are isolated:** partners.yaml, editor examples and names.yaml resolve beside the
+  `--glossary` in use (`glossary_dir()`, `SUBTITLE_GLOSSARY_DIR`), so an arm run on a snapshot
+  reads and writes the snapshot's copies instead of the live ones.
+- `harness-improver` skill: spot A/B with `--samples 3` and the sign-test verdict; `--editor` for
+  editor-prompt changes.
 - `translate_subtitle` split into cache / reuse / fresh-translation / cue-building helpers (no
   behavior change; unit tests for cache reuse and the retry path).
 
