@@ -51,9 +51,13 @@ def wrap_lines(text: str, spec: LangSpec, keep_together=()) -> list[str]:
         # a line (a lone '，' line, a line starting with a small katakana, a line ending with '「'),
         # so re-apply kinsoku after it. apply_kinsoku is width-guarded (it only pulls a char up if
         # it still fits max_cpl) and idempotent, so this can't re-overflow.
-        lines = apply_kinsoku(
-            _cap_widths(apply_kinsoku(_break_cjk(text, spec, keep_together), spec), spec), spec
-        )
+        raw = _break_cjk(text, spec, keep_together)
+        if spec.lang.startswith("zh"):
+            # a break that lands right before ，、； : the break IS the pause (CN SG strips line-end
+            # punctuation anyway), so drop the mark — otherwise kinsoku pulls the previous line's
+            # last character down with it and splits a word (连接|器，).
+            raw = [raw[0]] + [ln.lstrip("，、；") for ln in raw[1:]] if raw else raw
+        lines = apply_kinsoku(_cap_widths(apply_kinsoku(raw, spec), spec), spec)
         # trim stray ASCII/full-width space at line edges (JA uses U+3000 as an
         # internal phrase separator, but never at a line start/end)
         lines = [s for ln in lines if (s := ln.strip(" 　"))]
@@ -63,6 +67,36 @@ def wrap_lines(text: str, spec: LangSpec, keep_together=()) -> list[str]:
             lines = [s for ln in lines if (s := ln.strip("，、；"))]  # nor at line START (kinsoku)
         return lines
     return _break_latin(text, spec)
+
+
+def _is_cjk_char(ch: str) -> bool:
+    return "\u4e00" <= ch <= "\u9fff" or "\u3400" <= ch <= "\u4dbf"
+
+
+def join_cue_lines_zh(lines: list[str]) -> str:
+    """A zh cue's display lines joined for re-wrapping WITHOUT losing the pause the line break
+    carried. In our zh subtitles a line break (or a space) IS the pause — line-end ，、 are
+    stripped (CN SG) — so welding two lines ('…塞进一句话里' + '科技互联…' -> '…一句话里科技互联')
+    deletes a clause boundary. Rule: a break INSIDE a word (the tokenizer says so) joins with
+    nothing; any other break becomes a space, which the re-wrap may keep as a pause or break at."""
+    out = ""
+    for p in (ln.strip() for ln in lines):
+        if not p:
+            continue
+        if out:
+            a, b = out[-1], p[0]
+            if a in " 　，、；。！？：" or b in " 　，、；。！？：）」』":
+                pass
+            elif _is_cjk_char(a) and _is_cjk_char(b):
+                ok = _word_break_positions(out[-6:] + p[:6], "zh-Hans")
+                if not (ok and len(out[-6:]) not in ok):
+                    out += " "
+            elif not (a.isascii() and a.isalnum() and b.isascii() and b.isalnum()):
+                out += " "
+            else:
+                out += " "  # two Latin words
+        out += p
+    return out
 
 
 def _cap_widths(lines: list[str], spec: LangSpec) -> list[str]:
@@ -112,6 +146,16 @@ def _cap_widths(lines: list[str], spec: LangSpec) -> list[str]:
                     a -= 1
                 if a > 0:
                     k = a
+            # Same guard for a CJK WORD (连接|器, 感|觉): the width cut lands wherever the cap
+            # falls, so back up to the nearest boundary the tokenizer allows (within 6 chars).
+            # 2026-10-26: our own zh had 4-15 mid-word breaks per video from this cut, and a
+            # vendor review's re-wrapped lines 10-35 (a reviewed final can have 0).
+            elif 0 < k < len(ln) and _is_cjk_char(ln[k - 1]) and _is_cjk_char(ln[k]):
+                ok = _word_break_positions(ln, spec.lang)
+                if ok and k not in ok:
+                    back = [b for b in ok if 0 < b < k and k - b <= 6]
+                    if back:
+                        k = max(back)
             out.append(ln[:k].rstrip())
             ln = ln[k:].lstrip()
         if ln:
@@ -202,7 +246,9 @@ _JA_CLITIC_POS = ("助詞", "助動詞", "接尾辞", "補助記号", "記号")
 _ZH_WORDS = (
     "后端 前端 全栈 智能体 提示词 可观测性 可扩展性 工作流 数据库 服务器 客户端 服务端 云端 端到端 "
     "大模型 大语言模型 多模态 微服务 开源 代码库 代码审查 开发者 开发板 测试用例 部署 回滚 延迟 "
-    "并发 吞吐量 用户体验 用户界面 命令行 终端 插件 框架 组件 模块 接口 应用商店 设备端 电视端"
+    "并发 吞吐量 用户体验 用户界面 命令行 终端 插件 框架 组件 模块 接口 应用商店 设备端 电视端 "
+    # spoken endings jieba splits (直接问也|行 shipped in one video, 2026-10)
+    "也行 才行 都行 也好 就好"
 ).split()
 _ZH_READY = False
 
@@ -354,12 +400,53 @@ def boundary_kind(text: str, b: int, lang: str) -> int:
 _ZH_NO_LINE_START = set("的得地了着过们吗呢吧啊么")
 
 
+# zh conjunctions / connectives that bind to the clause after them (DCMP: don't break after a
+# conjunction) — a line ending on one reads as a dangling fragment.
+_ZH_NO_LINE_END_WORDS = (
+    "但",
+    "但是",
+    "而",
+    "而且",
+    "因为",
+    "所以",
+    "如果",
+    "虽然",
+    "不过",
+    "然后",
+    "并且",
+    "或者",
+    "以及",
+    "还有",
+    "就是",
+    "因此",
+    "并",
+    "和",
+    "与",
+    "及",
+    "或",
+)
+
+
+def _ends_on_conjunction(line: str) -> bool:
+    """The line's LAST WORD is a conjunction (the tokenizer decides: 参与 ends in 与 but is a verb)."""
+    t = line.rstrip(" 　")
+    if not t.endswith(_ZH_NO_LINE_END_WORDS):
+        return False
+    pos = _word_break_positions(t[-8:], "zh-Hans")
+    if not pos:
+        return len(t) >= 2 and t.endswith(tuple(w for w in _ZH_NO_LINE_END_WORDS if len(w) >= 2))
+    last = t[-8:][max(p for p in pos if p < len(t[-8:])) :]
+    return last in _ZH_NO_LINE_END_WORDS
+
+
 def _cut_score(text: str, start: int, b: int, spec: LangSpec) -> float:
     w1 = display_width(text[start:b], cjk=True)
     fill = w1 / spec.max_cpl
     score = fill + {2: 0.6, 1: 0.35, 0: 0.0}[boundary_kind(text, b, spec.lang)]
     if spec.lang.startswith("zh") and b < len(text) and text[b] in _ZH_NO_LINE_START:
         score -= 1.5  # a zh line never starts with a particle (明年|的路线图)
+    if spec.lang.startswith("zh") and _ends_on_conjunction(text[start:b]):
+        score -= 1.5  # a conjunction binds to what follows: never end a line on it (引导 但|实际上)
     if fill < 0.45:
         score -= 1.0  # no stubby lines
     w2 = display_width(text[b:].strip(" 　"), cjk=True)

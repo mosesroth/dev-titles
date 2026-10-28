@@ -39,6 +39,14 @@ _JA_SENT_END = re.compile(
 
 
 def join_lines(lines, lang="ja"):
+    if lang.startswith("zh"):  # zh: a line break is the pause — keep it (segment.cjk)
+        from dev_titles.segment.cjk import join_cue_lines_zh
+
+        return join_cue_lines_zh(lines)
+    return _join_lines_ja(lines, lang)
+
+
+def _join_lines_ja(lines, lang="ja"):
     """Join a reviewed cue's lines for re-wrapping without losing the reviewer's break. A line
     break between two ASCII alphanumerics was a word separator. In ja, reviewers often end a
     sentence with a line break instead of 。 (…こともできます⏎React Nativeの…): keep it as a
