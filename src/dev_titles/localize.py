@@ -19,6 +19,7 @@ import copy
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -68,34 +69,66 @@ def llm_serialize_lock(logger=_noop):
     """Serialize heavy-LLM jobs (translation, QE re-score) via a BLOCKING advisory file lock
     so two don't hammer Bedrock at once and cause sustained throttling -> dropped/untranslated
     segments. A second job WAITS for the first instead of
-    competing. Best-effort: if flock is unavailable, runs unguarded. Ad-hoc LLM scripts should
-    acquire this too (`with llm_serialize_lock(print): ...`)."""
-    import os
-
-    try:
-        import fcntl
-    except ImportError:  # Windows: no flock -> run unguarded
-        yield
-        return
+    competing. Best-effort: if the lock file can't be used, runs unguarded. Ad-hoc LLM scripts
+    should acquire this too (`with llm_serialize_lock(print): ...`). Works on macOS/Linux (flock)
+    and Windows (msvcrt)."""
     path = os.environ.get("DEV_TITLES_LLM_LOCK") or os.path.expanduser("~/.dev_titles_llm.lock")
     fh = None
     try:
-        fh = open(path, "w")
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        fh = open(path, "a+", encoding="utf-8")
+        if not _try_lock(fh):
             logger("LLM serialize lock: another translation/QE job is running — waiting…")
-            fcntl.flock(fh, fcntl.LOCK_EX)  # block until the other finishes
+            _lock(fh)  # block until the other finishes
         yield
     except OSError:
         yield  # can't create/lock the file -> run unguarded (best-effort)
     finally:
         if fh is not None:
             try:
-                fcntl.flock(fh, fcntl.LOCK_UN)
+                _unlock(fh)
                 fh.close()
             except OSError:
                 pass
+
+
+def _try_lock(fh) -> bool:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _lock(fh) -> None:
+    if sys.platform == "win32":
+        import time
+
+        while not _try_lock(fh):  # msvcrt's blocking mode gives up after ~10 s; poll instead
+            time.sleep(2)
+    else:
+        import fcntl
+
+        fcntl.flock(fh, fcntl.LOCK_EX)
+
+
+def _unlock(fh) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _normalizer(lang: str, conversational: bool = False):

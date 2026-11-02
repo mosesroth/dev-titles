@@ -81,7 +81,7 @@ def done_today(ledger: Path = LEDGER) -> set[str]:
         return set()
     return {
         json.loads(l)["video"]
-        for l in ledger.read_text().splitlines()
+        for l in ledger.read_text(encoding="utf-8").splitlines()
         if l.strip() and json.loads(l).get("applied")
     }
 

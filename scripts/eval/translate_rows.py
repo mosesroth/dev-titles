@@ -52,9 +52,9 @@ def video(d: str):
         if (p / "video_brief.txt").exists():
             vv["brief"] = (p / "video_brief.txt").read_text(encoding="utf-8").strip()
         if (p / "speakers.json").exists():
-            vv["speakers"] = json.loads((p / "speakers.json").read_text())["labels"]
+            vv["speakers"] = json.loads((p / "speakers.json").read_text(encoding="utf-8"))["labels"]
         if (p / "meaning_notes.json").exists():
-            vv["meaning_notes"] = json.loads((p / "meaning_notes.json").read_text())
+            vv["meaning_notes"] = json.loads((p / "meaning_notes.json").read_text(encoding="utf-8"))
         ctxs[d] = (sents, vv, _speakers_for(sents, vv), _ctx_for(sents, vv))
     return ctxs[d]
 

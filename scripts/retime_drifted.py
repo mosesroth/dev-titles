@@ -126,6 +126,8 @@ cues = build_target_cues(en, sents, texts, spec, keep_together=keep, free_segmen
 s = Subtitle("zh-Hans", cues).renumber()
 open(out_base + ".srt", "w", encoding="utf-8").write(write_srt(s))
 open(out_base + ".vtt", "w", encoding="utf-8").write(write_vtt(s))
-json.dump(texts, open(out_base + ".alignment.json", "w"), ensure_ascii=False, indent=0)
+json.dump(
+    texts, open(out_base + ".alignment.json", "w", encoding="utf-8"), ensure_ascii=False, indent=0
+)
 r = validity_report(s, False)
 print("cues", len(cues), "err-cues", r["cues_with_errors"], r["violations_by_rule"])

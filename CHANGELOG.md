@@ -5,6 +5,17 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 
 ## [Unreleased]
 
+### Added (Windows)
+- **Parakeet on every platform:** an `onnx-asr` backend (ONNX Runtime, CPU or GPU) beside `parakeet-mlx`,
+  picked automatically (`SUBTITLE_PARAKEET_BACKEND=mlx|onnx` forces one), so Windows, Linux and Intel Macs get
+  the same Parakeet transcription with the WhisperX cross-check. The `parakeet` extra installs the right one
+  per platform. Hesitations the ONNX build writes out (uh, um) are dropped: left in, each was a false
+  cross-check disagreement. On one 9.5-minute interview the two backends agreed on 94.7% of words.
+
+### Fixed (Windows)
+- The LLM job lock now uses `msvcrt` on Windows instead of running unguarded.
+- Every text file read and write names UTF-8 (Windows' default encoding can't write ja/zh); a test enforces it.
+
 ### Added
 - **Technology names stay Latin.** The per-video names policy now also lists `named_concepts`
   (frameworks, libraries, protocols, named technical concepts), which keep their Latin spelling.

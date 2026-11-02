@@ -654,7 +654,10 @@ def video_description(out_dir) -> str:
     src = d / "SOURCE-URL.txt"
     if not src.exists():
         return ""
-    m = re.search(r"https?://\S*(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]{11}", src.read_text())
+    m = re.search(
+        r"https?://\S*(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]{11}",
+        src.read_text(encoding="utf-8"),
+    )
     if not m:
         return ""
     try:

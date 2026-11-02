@@ -140,9 +140,9 @@ def main(argv=None) -> int:
         if (run / name).exists():
             vv[key] = (run / name).read_text(encoding="utf-8").strip()
     if (run / "speakers.json").exists():
-        vv["speakers"] = json.loads((run / "speakers.json").read_text())["labels"]
+        vv["speakers"] = json.loads((run / "speakers.json").read_text(encoding="utf-8"))["labels"]
     if (run / "meaning_notes.json").exists():
-        vv["meaning_notes"] = json.loads((run / "meaning_notes.json").read_text())
+        vv["meaning_notes"] = json.loads((run / "meaning_notes.json").read_text(encoding="utf-8"))
     spk, ctx = _speakers_for(sents, vv), _ctx_for(sents, vv)
     norm = _normalizer(a.lang, True)
     memo: dict = {}

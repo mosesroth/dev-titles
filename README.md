@@ -12,7 +12,8 @@ layout rules, validation and the guards that keep the LLM honest.
 ## What it does
 
 1. **Transcribe English locally.** The default engine is
-   [Parakeet](https://github.com/senstella/parakeet-mlx) (`parakeet-mlx`, Apple Silicon).
+   [Parakeet](https://github.com/senstella/parakeet-mlx) (`parakeet-mlx` on Apple Silicon,
+   [`onnx-asr`](https://github.com/istupakov/onnx-asr) on Windows, Linux and Intel Macs).
    It includes a WhisperX cross-check that splices back spans Parakeet silently drops on
    music or non-speech. [WhisperX](https://github.com/m-bain/whisperX) large-v3 works on
    any platform. `--engine auto` (the default) picks Parakeet on Apple Silicon when it is
@@ -122,8 +123,8 @@ Requires Python 3.10+ and `ffmpeg` on `PATH` for media input.
 ```bash
 git clone https://github.com/mosesroth/dev-titles && cd dev-titles
 pip install -e '.[cjk]'                   # core + word-safe CJK line breaking
-pip install -e '.[cjk,parakeet,whisper]'  # Apple Silicon: Parakeet ASR + WhisperX drop recovery
-pip install -e '.[cjk,whisper]'           # any platform: WhisperX ASR (~4 GB of models on first run)
+pip install -e '.[cjk,parakeet,whisper]'  # Parakeet ASR + WhisperX drop recovery (any platform)
+pip install -e '.[cjk,whisper]'           # WhisperX ASR only (~4 GB of models on first run)
 pip install -e '.[cjk,assemblyai]'        # cloud ASR instead: AssemblyAI ($ASSEMBLYAI_API_KEY)
 pip install -e '.[youtube]'               # + YouTube URL input (yt-dlp) and caption publishing
 pip install -e '.[dev]'                   # tests and linters

@@ -49,7 +49,11 @@ P = SEV_PROMPT
 
 
 def cache(p, lang):
-    return {r["src"].strip(): r["txt"] for r in map(json.loads, open(p)) if r.get("lang") == lang}
+    return {
+        r["src"].strip(): r["txt"]
+        for r in map(json.loads, open(p, encoding="utf-8"))
+        if r.get("lang") == lang
+    }
 
 
 N = lambda s: re.sub(r"\s", "", s or "")
@@ -97,7 +101,7 @@ for v, lang in SPECS:
     cand = [x for x in S if x["old"] != x["human"] or x["new"] != x["human"]]
     rows += random.sample(cand, min(A.n, len(cand)))
     print(v, lang, json.dumps(st), flush=True)
-json.dump(stats, open(f"{A.out}/stats.json", "w"), indent=1)
+json.dump(stats, open(f"{A.out}/stats.json", "w", encoding="utf-8"), indent=1)
 res = []
 for k in ("old", "new"):
     for lang in ("ja", "zh-Hans"):
@@ -133,7 +137,12 @@ for k in ("old", "new"):
                     )
                 )
             print(k, lang, b, len(R), flush=True)
-            json.dump(res, open(f"{A.out}/severity.json", "w"), ensure_ascii=False, indent=1)
+            json.dump(
+                res,
+                open(f"{A.out}/severity.json", "w", encoding="utf-8"),
+                ensure_ascii=False,
+                indent=1,
+            )
 import collections
 
 lines = ["| lang | version | n | OK | NOTICEABLE | MEANING |", "|---|---|---|---|---|---|"]
@@ -146,6 +155,6 @@ for lang in sorted({r["lang"] for r in res}):
         lines.append(
             f"| {lang} | {k} | {len(S)} | {c['OK']/len(S):.0%} | {c['NOTICEABLE']/len(S):.0%} | {c['MEANING']/len(S):.0%} |"
         )
-open(f"{A.out}/summary.md", "w").write("\n".join(lines) + "\n")
+open(f"{A.out}/summary.md", "w", encoding="utf-8").write("\n".join(lines) + "\n")
 print("\n".join(lines))
 print("DONE")

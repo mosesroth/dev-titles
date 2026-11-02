@@ -60,3 +60,50 @@ def test_localize_arm_refuses_the_live_repo():
         text=True,
     )
     assert r.returncode != 0 and "live repo" in r.stderr
+
+
+def test_every_text_file_io_names_utf8():
+    """Windows' default encoding can't write ja/zh: every open()/read_text()/write_text() in src/
+    and scripts/ must say encoding= (binary modes excepted)."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    bad = []
+    for p in list((root / "src").rglob("*.py")) + list((root / "scripts").rglob("*.py")):
+        for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+            if "encoding" in {k.arg for k in n.keywords}:
+                continue
+            if name == "open" and isinstance(f, ast.Name):
+                mode = (
+                    n.args[1].value
+                    if len(n.args) > 1 and isinstance(n.args[1], ast.Constant)
+                    else "r"
+                )
+                mode = next(
+                    (
+                        k.value.value
+                        for k in n.keywords
+                        if k.arg == "mode" and isinstance(k.value, ast.Constant)
+                    ),
+                    mode,
+                )
+                if "b" not in str(mode):
+                    bad.append(f"{p.relative_to(root)}:{n.lineno}")
+            elif name in ("read_text", "write_text"):
+                bad.append(f"{p.relative_to(root)}:{n.lineno}")
+    assert not bad, bad
+
+
+def test_llm_lock_acquires_and_releases(tmp_path, monkeypatch):
+    from dev_titles.localize import llm_serialize_lock
+
+    monkeypatch.setenv("SUBTITLE_LLM_LOCK", str(tmp_path / "lock"))
+    with llm_serialize_lock():
+        pass
+    with llm_serialize_lock():  # re-acquirable after release
+        pass

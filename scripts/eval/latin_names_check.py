@@ -55,7 +55,7 @@ for lang in LN:
         ep = Path(default_en_dir()) / f"{v}.en.srt"
         if not ep.exists():
             continue
-        en, tgt = ep.read_text(), tp.read_text()
+        en, tgt = ep.read_text(encoding="utf-8"), tp.read_text(encoding="utf-8")
         ns = sorted(
             {
                 n

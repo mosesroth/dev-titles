@@ -176,7 +176,7 @@ def main():
         if audio and not pj.exists():
             t = asr.transcribe(str(audio))
             pj.write_text(json.dumps([[w.text, w.start] for w in t.words]), encoding="utf-8")
-        words = json.loads(pj.read_text()) if pj.exists() else []
+        words = json.loads(pj.read_text(encoding="utf-8")) if pj.exists() else []
         auto_p = next(
             iter(sorted(m.glob(f"{v}.en-orig.vtt")) + sorted(m.glob(f"{v}.en.vtt"))), None
         )

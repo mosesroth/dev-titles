@@ -381,3 +381,32 @@ def test_dedup_rolling_cues_and_caption_adapter():
     assert [w.text for w in tr.words] == ["hello", "there", "next", "line", "here"]
     assert tr.words[0].start == 0.0 and tr.words[-1].end <= 5.0 + 1e-6
     assert all(w.start < w.end for w in tr.words)  # every word has a positive span
+
+
+def test_onnx_parakeet_tokens_become_words():
+    """onnx-asr segment results (segment-relative token starts, logprobs) -> the same Words the MLX
+    backend produces: absolute times, a token ends where the next starts, confidence = exp(logprob).
+    """
+    import math
+    from types import SimpleNamespace as NS
+
+    from dev_titles.transcribe.parakeet import onnx_tokens, words_from_tokens
+
+    seg = NS(
+        start=2.0,
+        end=3.0,
+        tokens=[" H", "i", ",", " An", "isha"],
+        timestamps=[0.0, 0.1, 0.2, 0.3, 0.5],
+        logprobs=[math.log(0.9), 0.0, 0.0, math.log(0.5), 0.0],
+    )
+    words = words_from_tokens(onnx_tokens([seg]))
+    assert [w.text for w in words] == ["Hi,", "Anisha"]
+    assert words[0].start == 2.0 and abs(words[0].end - 2.3) < 1e-9
+    assert abs(words[1].confidence - 0.5) < 1e-9 and words[1].end == 3.0
+
+
+def test_parakeet_backend_can_be_forced(monkeypatch):
+    from dev_titles.transcribe import parakeet
+
+    monkeypatch.setenv("SUBTITLE_PARAKEET_BACKEND", "onnx")
+    assert parakeet.backend() == "onnx"

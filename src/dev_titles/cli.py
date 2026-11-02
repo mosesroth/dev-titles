@@ -380,7 +380,7 @@ def _speech_align(en, out: Path):
 
             m = _re.search(
                 r"v=([A-Za-z0-9_-]{11})|youtu\.be/([A-Za-z0-9_-]{11})",
-                (out / "SOURCE-URL.txt").read_text(),
+                (out / "SOURCE-URL.txt").read_text(encoding="utf-8"),
             )
             if m:
                 speech = speech_words_for(m.group(1) or m.group(2), out / "_speech")
@@ -812,23 +812,20 @@ def _qe_second_judge(args):
 
 
 def _resolve_engine(name: str) -> str:
-    """--engine auto: Parakeet on Apple Silicon when parakeet-mlx is installed (fastest, best on
-    jargon), else WhisperX when installed; otherwise stop with the install options."""
+    """--engine auto: Parakeet wherever a Parakeet backend is installed (parakeet-mlx on Apple
+    Silicon, onnx-asr elsewhere; fastest, best on jargon, cross-checked by WhisperX), else WhisperX
+    when installed; otherwise stop with the install options."""
     if name != "auto":
         return name
     import importlib.util
     import os
-    import platform
 
-    apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
-    if apple_silicon and importlib.util.find_spec("parakeet_mlx"):
+    from .transcribe.parakeet import backend
+
+    if backend():
         return "parakeet"
     if importlib.util.find_spec("whisperx"):
-        print(
-            "ASR: WhisperX (Parakeet needs Apple Silicon + parakeet-mlx)"
-            if not apple_silicon
-            else "ASR: WhisperX (parakeet-mlx not installed)"
-        )
+        print("ASR: WhisperX (no Parakeet backend installed: pip install 'dev-titles[parakeet]')")
         return "whisper"
     if os.environ.get("ASSEMBLYAI_API_KEY"):
         print("ASR: AssemblyAI (no local ASR installed; $ASSEMBLYAI_API_KEY is set)")
@@ -836,9 +833,7 @@ def _resolve_engine(name: str) -> str:
     raise SystemExit(
         "No speech-recognition engine installed. Pick one:\n"
         + (
-            "  pip install 'dev-titles[parakeet,whisper]'   # Parakeet + WhisperX drop recovery (Apple Silicon)\n"
-            if apple_silicon
-            else ""
+            "  pip install 'dev-titles[parakeet,whisper]'   # Parakeet + WhisperX drop recovery (any platform)\n"
         )
         + "  pip install 'dev-titles[whisper]'            # WhisperX, local, any platform\n"
         "  pip install 'dev-titles[assemblyai]'         # AssemblyAI cloud: set $ASSEMBLYAI_API_KEY, --engine assemblyai\n"
@@ -956,7 +951,7 @@ def _transcribe_media(args, ri, out: Path, video_vocab):
         # No initial_prompt biasing (jargon is handled downstream).
         from .transcribe import ParakeetTranscriber
 
-        print("Transcribing with Parakeet (parakeet-mlx)…")
+        print("Transcribing with Parakeet…")
         transcript = ParakeetTranscriber().transcribe(ri.path, language="en")
         # DROP RECOVERY: Parakeet (RNNT/TDT) silently deletes whole spans on
         # music/non-speech (NeMo #14430). A cheap WhisperX pass (base) catches
@@ -1518,8 +1513,8 @@ def _add_run_parser(sub) -> None:
         "--engine",
         choices=["auto", "whisper", "parakeet", "assemblyai"],
         default="auto",
-        help="primary ASR: auto (default: parakeet on Apple Silicon if installed, else "
-        "whisper), parakeet (fast, local; Apple Silicon), whisper (WhisperX large-v3, local, "
+        help="primary ASR: auto (default: parakeet if installed, else whisper), parakeet (fast, "
+        "local; MLX on Apple Silicon, ONNX elsewhere), whisper (WhisperX large-v3, local, "
         "any platform; slower on CPU), or assemblyai (cloud, diarized; uploads the audio; "
         "needs $ASSEMBLYAI_API_KEY)",
     )
