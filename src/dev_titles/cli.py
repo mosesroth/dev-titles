@@ -278,6 +278,52 @@ def _en_review_md(title: str, cr_lines: list[str], applied: list, held: list) ->
     return "\n".join(lines) + "\n"
 
 
+def _meaning_holds(en, out, invoke) -> list[dict]:
+    """Meaning notes (en_gloss), checked by a second model family, built HERE — before the sign-off —
+    so a phrase the two models read differently is decided once by the operator, not guessed in both
+    languages ("Take the jump from 0.72 to 0.83": one model said "for example", it meant "upgrade").
+    Returns held items for the EN review; localize reuses the cached, verified notes."""
+    import types
+
+    from .editor import video_brief, video_description
+    from .en_gloss import disputed, meaning_notes
+    from .resegment import merge_en_to_sentences
+
+    second = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
+    if second is None:
+        return []
+    o = Path(out)
+    try:
+        brief = video_brief(
+            " ".join(c.text for c in en.cues),
+            invoke,
+            o / "video_brief.txt",
+            description=video_description(o),
+        )
+        meaning_notes(
+            merge_en_to_sentences(en),
+            invoke,
+            o / "meaning_notes.json",
+            brief=brief or "",
+            verify=second,
+        )
+    except Exception as e:  # never sink the EN review on it
+        print(f"meaning check skipped ({type(e).__name__})")
+        return []
+    held = []
+    for d in disputed(o / "meaning_notes.json"):
+        m, sec = divmod(int(d.get("start") or 0), 60)
+        held.append(
+            {
+                "ts": f"{m:02d}:{sec:02d}",
+                "kind": "en-meaning",
+                "detail": f"What does \"{d['phrase']}\" mean here? One model: {d['a']}; the other: {d['b']}. "
+                f"Answer with: dev_titles set-meaning <out> --sentence \"{d['sentence']}\" --meaning \"…\"",
+            }
+        )
+    return held
+
+
 def _en_review(en, out, title: str = "", en_style: str | None = None):
     """General editorial review of the EN script (spelling, grammar, terminology, garbled
     phrasing) — the standard proofread any script gets, run on ANY EN source (a human transcript
@@ -309,14 +355,18 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
         en_gate.save_review_state(out, "failed", [])
         return en
     if not issues:
-        en_gate.save_review_state(out, "ok", [])
+        mh = _meaning_holds(en, out, invoke)
+        en_gate.save_review_state(out, "ok", mh)
         rpath.write_text(
             f"# EN editorial review — {title}\n\n"
             + "\n".join(cr_lines)
-            + "\nNo editorial issues flagged.\n",
+            + ("\nNo editorial issues flagged.\n" if not mh else _en_review_md(title, [], [], mh)),
             encoding="utf-8",
         )
-        print("EN review: no editorial issues flagged.")
+        print(
+            "EN review: no editorial issues flagged."
+            + (f" {len(mh)} meaning(s) held." if mh else "")
+        )
         return en
     try:
         new_en, applied, held = en_autofix(en, issues, invoke)
@@ -325,6 +375,7 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
         new_en, applied, held = en, [], issues
     if applied:  # persist corrected EN; keep the original
         _write_en_keep_orig(out, en, new_en)
+    held = held + _meaning_holds(new_en, out, invoke)
     rpath.write_text(_en_review_md(title, cr_lines, applied, held), encoding="utf-8")
     en_gate.save_review_state(
         out, "ok", [{k: s.get(k, "") for k in ("ts", "kind", "detail")} for s in held], len(applied)
@@ -1239,6 +1290,33 @@ def cmd_run(args) -> int:
     print(f"Resolved {args.input} -> {ri.kind} ({ri.title or ri.path})")
 
     # 1) EN master: from a subtitle input directly, else transcribe (+ clean-read correct) the media.
+    # Once the EN stage has run (en_review.md + en.vtt exist), out/en.vtt is the OPERATOR'S working copy:
+    # held lines get resolved in it and it is what approve-en signs. Re-running `run` on the media used
+    # to rebuild it from the raw transcript (the LLM correction is not deterministic either), silently
+    # discarding those edits; the gate then refused the changed EN (one video). Reuse it.
+    if (
+        ri.kind != "subtitle"
+        and not args.rebuild_en
+        and (out / "en_review.md").exists()
+        and (out / "en.vtt").exists()
+    ):
+        print(
+            f"Using the existing EN working copy {out}/en.vtt (held lines are resolved in it); "
+            "--rebuild-en re-transcribes and discards it."
+        )
+        en = _read_any(str(out / "en.vtt"), "en")
+        if args.transcribe_only:
+            return 0
+        return _translate_and_bundle(
+            args,
+            en,
+            out,
+            glossary,
+            video_vocab,
+            title=ri.title or ri.path,
+            en_path=str(out / "en.vtt"),
+            cache_path=str(out / "cache.jsonl"),
+        )
     if ri.kind == "subtitle":
         en = _en_from_caption(args, ri, glossary, video_vocab, out)
     else:
@@ -1269,6 +1347,64 @@ def cmd_run(args) -> int:
     )
 
 
+def cmd_set_meaning(args) -> int:
+    from .en_gloss import set_operator_meaning
+
+    set_operator_meaning(Path(args.out) / "meaning_notes.json", args.sentence, args.meaning)
+    print(
+        f"meaning recorded for: {args.sentence}\n  -> {args.meaning}\nBoth languages will use it."
+    )
+    return 0
+
+
+def cmd_fix_line(args) -> int:
+    """Edit matching lines in <out>/cache.jsonl, mark them locked, and log the edit; re-running
+    `localize`/`run` rebuilds the subtitles from the cache (only changed lines are re-checked) and
+    every automatic step leaves locked lines alone."""
+    import getpass
+    import time
+
+    cp = Path(args.out) / "cache.jsonl"
+    rows = [json.loads(x) for x in cp.read_text(encoding="utf-8").splitlines() if x.strip()]
+    hit = []
+    for r in rows:
+        if (
+            r.get("lang") == args.lang
+            and args.find in r.get("txt", "")
+            and args.en_contains.lower() in r.get("src", "").lower()
+        ):
+            before = r["txt"]
+            r["txt"] = before.replace(args.find, args.replace)
+            r["locked"] = True
+            hit.append({"i": r["i"], "en": r["src"], "before": before, "after": r["txt"]})
+    if not hit:
+        print(
+            f"no {args.lang} line contains {args.find!r}"
+            + (" with that English" if args.en_contains else "")
+        )
+        return 1
+    cp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    with (Path(args.out) / "locked_edits.jsonl").open("a", encoding="utf-8") as fh:
+        for h in hit:
+            fh.write(
+                json.dumps(
+                    {
+                        **h,
+                        "lang": args.lang,
+                        "by": getpass.getuser(),
+                        "at": time.strftime("%Y-%m-%d %H:%M"),
+                        "note": args.note,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    for h in hit:
+        print(f"locked #{h['i']}: {h['before']}\n      -> {h['after']}")
+    print("Re-run localize/run on this folder to rebuild the subtitle files.")
+    return 0
+
+
 def cmd_approve_en(args) -> int:
     import getpass
 
@@ -1282,6 +1418,15 @@ def cmd_approve_en(args) -> int:
         return 3
     for h in held:
         print(f"  held {h.get('ts', '?'):>6}  {h.get('kind', '')}: {h.get('detail', '')}")
+    from .en_gloss import disputed
+
+    open_q = disputed(Path(args.out) / "meaning_notes.json")
+    if open_q:
+        # a meaning question is not resolved by signing off: both languages need the answer
+        print(f"Cannot sign off: {len(open_q)} meaning question(s) unanswered. For each, run:")
+        for d in open_q:
+            print(f'  dev_titles set-meaning {args.out} --sentence "{d["sentence"]}" --meaning "…"')
+        return 4
     rec = en_gate.approve(args.out, en, by=getpass.getuser(), note=args.note)
     print(
         f"EN signed off: {en_path} ({len(held)} held line(s) resolved by {rec['by']}, {rec['at']})"
@@ -1460,6 +1605,12 @@ def _add_run_parser(sub) -> None:
     _add_translate_options(rn)
     rn.add_argument("--transcribe-only", action="store_true", help="EN transcription only")
     rn.add_argument(
+        "--rebuild-en",
+        action="store_true",
+        help="re-transcribe and rebuild en.vtt even though the EN stage already ran (discards the "
+        "working copy, including resolved held lines; needs a new sign-off)",
+    )
+    rn.add_argument(
         "--translate-only", action="store_true", help="translation only (input is EN subs)"
     )
     rn.add_argument("--clean", action="store_true", help="LLM cleanup pass on ASR cues")
@@ -1593,6 +1744,27 @@ def _add_review_parsers(sub) -> None:
     ap.add_argument("--en", help="the EN file that will be translated (default <out>/en.vtt)")
     ap.add_argument("--note", default="", help="what was resolved, for the record")
     ap.set_defaults(func=cmd_approve_en)
+    sm = sub.add_parser(
+        "set-meaning",
+        help="answer a held meaning question (en-meaning): what an English phrase means here",
+    )
+    sm.add_argument("out", help="the video's output dir (holds meaning_notes.json)")
+    sm.add_argument(
+        "--sentence", required=True, help="the English sentence, as quoted in the held item"
+    )
+    sm.add_argument("--meaning", required=True, help="what the speaker means")
+    sm.set_defaults(func=cmd_set_meaning)
+    fx = sub.add_parser(
+        "fix-line",
+        help="correct a translated line by hand and LOCK it: no automatic step changes it again",
+    )
+    fx.add_argument("out", help="the video's output dir (holds cache.jsonl)")
+    fx.add_argument("--lang", required=True, choices=["ja", "zh-Hans"])
+    fx.add_argument("--find", required=True, help="text in the current translation to replace")
+    fx.add_argument("--replace", required=True, help="the corrected text")
+    fx.add_argument("--en-contains", default="", help="only lines whose English contains this")
+    fx.add_argument("--note", default="", help="why, for the record")
+    fx.set_defaults(func=cmd_fix_line)
 
 
 def _add_glossary_parsers(sub) -> None:

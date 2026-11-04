@@ -1619,3 +1619,49 @@ def test_qe_repair_protects_editor_rewrites_and_runs_accept_check():
     assert (
         fixed == [] and recs[1].txt == "素晴らしい可能性です"
     )  # accept_check rejected the literal sense
+
+
+def test_run_reuses_the_en_working_copy_after_the_en_stage(tmp_path, monkeypatch):
+    """A second `run` on media must not rebuild en.vtt (it holds the operator's resolved lines)."""
+    from types import SimpleNamespace as NS
+
+    from dev_titles import cli
+    from dev_titles.formats import write_vtt
+
+    out = tmp_path / "v"
+    out.mkdir()
+    (out / "en_review.md").write_text("done", encoding="utf-8")
+    (out / "en.vtt").write_text(
+        write_vtt(Subtitle("en", [Cue(0.0, 2.0, ["built for React 19."])])), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_input",
+        lambda *a, **k: NS(kind="media", path="x.mp4", title="x"),
+        raising=False,
+    )
+    import dev_titles.ingest as ingest
+
+    monkeypatch.setattr(
+        ingest, "resolve_input", lambda *a, **k: NS(kind="media", path="x.mp4", title="x")
+    )
+    monkeypatch.setattr(cli, "_run_vocab", lambda args, out: {})
+    monkeypatch.setattr(
+        cli,
+        "_transcribe_media",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-transcribed")),
+    )
+    seen = {}
+    monkeypatch.setattr(
+        cli, "_translate_and_bundle", lambda args, en, *a, **k: seen.setdefault("en", en) and 0
+    )
+    args = NS(
+        input="x.mp4",
+        out=str(out),
+        glossary="glossary/glossary.yaml",
+        rebuild_en=False,
+        transcribe_only=False,
+        translate_only=False,
+    )
+    cli.cmd_run(args)
+    assert seen["en"].cues[0].lines == ["built for React 19."]

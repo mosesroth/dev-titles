@@ -575,6 +575,10 @@ class SentenceRecord:
     txt: str
     residual_miss: str
     issues: list[dict]
+    # set by a person (`dev_titles fix-line`): no automatic step may change this line again. The
+    # editor and QE-repair passes re-edited exactly the lines an operator had just corrected (one video:
+    # an official product name back to lowercase, a misreading re-introduced).
+    locked: bool = False
 
 
 def _fixed_line(g, lang: str, src: str) -> str | None:
@@ -622,6 +626,10 @@ def _reuse_record(i, s, cache, cache_by_src, g, lang, normalize, logger):
     reuse = cache[i] if (i in cache and cache[i].src == s.text) else cache_by_src.get(s.text)
     if reuse is None:
         return None
+    if (
+        reuse.locked
+    ):  # a person's correction: reuse verbatim, no re-enforce / normalize / re-translate
+        return SentenceRecord(lang, i, s.text, reuse.txt, "", [], locked=True), []
     if stale_untranslated_reuse(reuse.txt, s.text, g, lang):
         # A glossary fix made a term that this cached target left Latin now TRANSLATABLE
         # (App Store -> 应用商店); enforce can't reverse it, so drop the reuse and re-translate
@@ -1322,25 +1330,95 @@ def _localize_en_impl(
     if run.qe_invoke is not None and native_editor:
         _prepare_video(run)
     outputs: list[LangOutput] = []
+    done: list[_LangRun] = []
     for lang in run.langs:
         L = _translate_lang(run, lang)
-        _pronoun_pass(run, L)
-        _condense_pass(run, L)
-        _editor_pass(run, L)
-        _review_pass(run, L)
-        _condensation_revert(run, L)
-        _qe_repair_pass(run, L)
-        _term_pin_pass(run, L)
+        locked = {r.i: r.txt for r in L.records if r.locked}
+        for step in (
+            _pronoun_pass,
+            _condense_pass,
+            _editor_pass,
+            _review_pass,
+            _condensation_revert,
+            _qe_repair_pass,
+            _term_pin_pass,
+        ):
+            step(run, L)
+            _restore_locked(L, locked)
         if L.dqf is not None and L.qe_state_path is not None:
             from .translation_qe import save_qe_state
 
             # the final, post-repair panel, so the NEXT run can re-review incrementally
             save_qe_state(L.qe_state_path, L.records, L.dqf, L.suspects)
-        _latin_name_consistency(run, L)
-        _dnt_autocorrect(run, L)
+        for step in (_latin_name_consistency, _dnt_autocorrect):
+            step(run, L)
+            _restore_locked(L, locked)
+        done.append(L)
+    # review-and-fix needs every language (the zh-vs-ja meaning check), so it runs after all of them
+    for L in done:
+        locked = {r.i: r.txt for r in L.records if r.locked}
+        _review_fix_pass(run, L, [o for o in done if o is not L])
+        _enforce_hard_terms(run, L)
+        _restore_locked(L, locked)
+        _rewrite_cache(run.cache_path, L.lang, L.records)
         outputs.append(_finalize_lang(run, L))
     _write_status(cache_path, phase="complete")
     return outputs
+
+
+def _restore_locked(L: "_LangRun", locked: dict) -> None:
+    """Put back every line a person locked (`dev_titles fix-line`): no automatic step changes it."""
+    for r in L.records:
+        if r.i in locked and r.txt != locked[r.i]:
+            r.txt = locked[r.i]
+            r.locked = True
+
+
+def _review_fix_pass(run: "_Run", L: "_LangRun", others: list) -> None:
+    """The review a person did on REVIEW.md, as a gated pass (adjudicate.py): leftover QE findings,
+    term consistency within the track, and zh-vs-ja meaning disagreements -> minimal fixes, each
+    applied only if the judges prefer it. Runs in the full-quality mode (native editor on)."""
+    if not (run.native_editor and run.qe_invoke is not None and L.records):
+        return
+    from .adjudicate import review_and_fix
+
+    other = {others[0].lang: others[0].records} if others else None
+    try:
+        log = review_and_fix(
+            L.lang,
+            L.name,
+            L.records,
+            L.suspects,
+            run.qe_invoke,
+            [j for j in (run.qe_invoke, run.qe_second_judge) if j],
+            other=other,
+            logger=run.logger,
+        )
+    except Exception as e:  # never sink a run on it
+        run.logger(f"{L.lang}: review-and-fix skipped ({type(e).__name__})")
+        return
+    fixed = {e["i"] for e in log if e["status"] == "fixed"}
+    L.suspects = [s for s in L.suspects if s.get("i") not in fixed]
+    if run.cache_path:
+        Path(run.cache_path).with_name(f"review_fix_log.{L.lang}.json").write_text(
+            json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+
+def _enforce_hard_terms(run: "_Run", L: "_LangRun") -> None:
+    """Re-apply the glossary's hard terms once every rewriting step has run: the editor and repair
+    passes can undo an approved rendering (an official product name re-lowercased)."""
+    g, _ = effective_glossary(run.glossary, run.video_vocab, run.conversational, lang=L.lang)
+    n = 0
+    for r in L.records:
+        if r.locked:
+            continue
+        txt, _iss = g.enforce(r.txt, r.src, L.lang)
+        if txt != r.txt:
+            r.txt = txt
+            n += 1
+    if n:
+        run.logger(f"{L.lang}: hard glossary terms re-applied on {n} line(s)")
 
 
 # ---- video-level preparation (once, shared by every language) ----
@@ -1357,9 +1435,11 @@ def _prepare_video(run: _Run) -> None:
         run.path("video_brief.txt"),
         description=video_description(od),
     )
+    # (no channel-level context: measured 2026-11-03, the models read developer senses of 15 unlisted
+    # domain words correctly 30/30 even with no brief at all; a channel description added nothing)
     if brief:
         run.video_vocab = {**(run.video_vocab or {}), "brief": brief}
-        run.logger(f"video brief: {brief[:160]}…")
+        run.logger(f"video brief: {brief[-160:]}…")
     _add_speakers(run, brief or "")
     _add_meaning_notes(run, brief or "")
     _apply_names_policy(run, brief or "")
@@ -1395,6 +1475,7 @@ def _add_meaning_notes(run: _Run, brief: str) -> None:
             run.qe_invoke,
             run.path("meaning_notes.json"),
             brief=brief,
+            verify=run.qe_second_judge,  # disputed notes are dropped (and held at the EN sign-off)
         )
     except Exception as e:  # never sink a run on it
         run.logger(f"meaning notes skipped ({type(e).__name__})")

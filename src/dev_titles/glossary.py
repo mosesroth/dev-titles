@@ -195,6 +195,18 @@ class Glossary:
                                 )
                             )
                             break
+            # Latin canonical written with other CASING ('React compiler' for 'React Compiler'):
+            # same letters, so normalize it. Word-bounded; hard terms only. The editor pass had
+            # re-lowercased an official product name after it was fixed (one video).
+            if term.enforce == "hard" and canonical and canonical.isascii() and not _has(canonical):
+                pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(canonical)}(?![A-Za-z0-9])", re.I)
+                if pat.search(target):
+                    target = pat.sub(canonical, target)
+                    issues.append(
+                        EnforcementIssue(
+                            term.source, lang, "fixed", canonical, f"casing -> {canonical!r}"
+                        )
+                    )
             # Full canonical enforcement (force-insert / missing-flag) stays
             # HARD-only: soft terms are guidance, not mandatory renderings.
             if term.enforce != "hard" or not canonical:

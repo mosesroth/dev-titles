@@ -5,6 +5,24 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 
 ## [Unreleased]
 
+### Added (review and corrections)
+- **Locked lines:** `dev-titles fix-line <out> --lang --find --replace` corrects a translated line and locks it;
+  no automatic step (editor, repair, term pins, re-runs) changes a locked line again.
+- **Review-and-fix pass** (`adjudicate.py`), after all languages: the QE findings left after repair, terms
+  rendered two ways in one track (unified toward the majority), and lines where the zh and ja translations
+  disagree on the meaning. Each gets a minimal fix or NO_CHANGE; a fix is kept only if it passes the repair
+  gates and the judges prefer it (on a 1-1 split, a second round: at least 3 of 4 votes). On one video it
+  recovered about half of what a manual review fixed, plus fixes the reviewer hadn't made.
+- **Meaning notes checked by a second model family:** the second model reads each phrase blind, a separate
+  call compares the two readings; agreed notes reach the translators, disputed ones are held at the English
+  sign-off, answered with `dev-titles set-meaning`, and sign-off is refused while one is open. One model's
+  wrong gloss had been followed by both languages.
+
+### Fixed (review and corrections)
+- Re-running `run` on the media after the English stage reuses `en.vtt` (the operator's working copy) instead
+  of rebuilding it from the raw transcript; `--rebuild-en` forces a rebuild.
+- Hard glossary terms are re-applied after every rewriting step, including the casing of Latin names.
+
 ### Added (Windows)
 - **Parakeet on every platform:** an `onnx-asr` backend (ONNX Runtime, CPU or GPU) beside `parakeet-mlx`,
   picked automatically (`SUBTITLE_PARAKEET_BACKEND=mlx|onnx` forces one), so Windows, Linux and Intel Macs get

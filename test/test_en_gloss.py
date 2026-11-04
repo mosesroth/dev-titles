@@ -1,29 +1,45 @@
-"""Meaning notes: idioms / ambiguous phrases resolved once in the English and attached per sentence."""
-
 import json
+from types import SimpleNamespace as S
 
-from dev_titles.en_gloss import meaning_note, meaning_notes, meaning_tag
-from dev_titles.resegment import Sentence
-
-
-def _sents(*texts):
-    return [Sentence(t, i * 3.0, i * 3.0 + 2.5) for i, t in enumerate(texts)]
+from dev_titles.en_gloss import disputed, meaning_notes, set_operator_meaning
 
 
-def test_notes_kept_only_when_the_phrase_is_in_that_sentence(tmp_path):
-    s = _sents("Bring it home.", "And there are two ways of having local models.")
-    fake = lambda _: json.dumps(
-        [
-            {"id": 0, "phrase": "Bring it home", "meaning": "make it concrete"},
-            {"id": 1, "phrase": "boil the ocean", "meaning": "invented"},
-        ]
+def _sents(*t):
+    return [S(text=x, start=float(k)) for k, x in enumerate(t)]
+
+
+def test_disputed_notes_are_dropped_and_operator_answers_win(tmp_path):
+    sents = _sents(
+        "The plugin installs.", "Take the jump from 0.72 to 0.83.", "It stays navigable."
     )
-    n = meaning_notes(s, fake, tmp_path / "mn.json")
-    assert list(n) == [0] and n[0][0]["meaning"] == "make it concrete"
-    assert meaning_notes(s, lambda _: 1 / 0, tmp_path / "mn.json") == n  # cached
+    notes = (
+        '[{"id": 1, "phrase": "Take the jump", "meaning": "for example, not an instruction"},'
+        ' {"id": 2, "phrase": "stays navigable", "meaning": "usable as you go"}]'
+    )
+    inv = lambda p: notes  # noqa: E731
 
+    def verify(p):
+        if p.startswith("Two readings"):  # the comparison call
+            return '{"same": false}' if "for example" in p else '{"same": true}'
+        return (
+            '{"meaning": "make the upgrade"}'
+            if "PHRASE: Take the jump" in p
+            else '{"meaning": "usable as you go"}'
+        )
 
-def test_prompt_and_editor_forms():
-    n = {3: [{"phrase": "Bring it home", "meaning": "make it concrete"}]}
-    assert "translate the meaning" in meaning_note(3, n) and meaning_note(4, n) == ""
-    assert meaning_tag(3, n) == " [means: Bring it home = make it concrete]"
+    cp = tmp_path / "meaning_notes.json"
+    mn = meaning_notes(sents, inv, cp, verify=verify)
+    assert 1 not in mn and 2 in mn  # the disputed note never reaches the translators
+    q = disputed(cp)
+    assert (
+        len(q) == 1
+        and q[0]["sentence"] == "Take the jump from 0.72 to 0.83."
+        and q[0]["b"] == "make the upgrade"
+    )
+    set_operator_meaning(cp, q[0]["sentence"], "make the upgrade from 0.72 to 0.83")
+    assert disputed(cp) == []
+    mn = meaning_notes(sents, inv, cp, verify=verify)  # cached: no model calls needed
+    assert (
+        mn[1][0]["meaning"] == "make the upgrade from 0.72 to 0.83" and mn[1][0]["by"] == "operator"
+    )
+    assert json.loads(cp.read_text(encoding="utf-8"))["operator"]
