@@ -348,6 +348,30 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
 
     invoke = llm.invoke()
     en, cr_lines = _clean_read_stage(en, out, invoke, title, en_style)
+    # approved English spelling of product / technology names (glossary/en_terms.yaml), before the
+    # model's proofread: deterministic, same letters only ("Android tv" -> "Android TV")
+    from .en_terms import apply as _approved_spellings
+
+    en2, spell = _approved_spellings(en)
+    if spell:
+        _write_en_keep_orig(out, en, en2)
+        en = en2
+        cr_lines = (
+            cr_lines
+            + [
+                f"## Approved spellings applied ({len(spell)})",
+                "",
+                "| Time | Found | Approved |",
+                "|---|---|---|",
+            ]
+            + [
+                f"| {int(en.cues[x['cue']].start // 60):02d}:{int(en.cues[x['cue']].start % 60):02d} "
+                f"| {x['found']} | {x['approved']} |"
+                for x in spell
+            ]
+            + [""]
+        )
+        print(f"EN approved spellings: {len(spell)} name(s) normalized")
     try:
         issues = _rev(en, invoke)
     except Exception as e:

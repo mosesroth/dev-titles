@@ -5,6 +5,14 @@ versions follow [Semantic Versioning](https://semver.org/) (0.x: the CLI and mod
 
 ## [Unreleased]
 
+### Added (English spelling)
+- **Approved English spelling of product and technology names:** `scripts/build_en_terms.py` builds
+  `glossary/en_terms.yaml` from the glossary, an optional term base, documentation names harvested per video
+  and the partner list, keeping only real names (no title-cased UI labels, no names ending in a generic word,
+  no one-word names that are also English words). The English review applies it before the proofread: case
+  and spacing variants become the approved form, code and package names are left alone, and every change is
+  listed in en_review.md. Hand-curated `extra`, `exclude`, `aliases` and `brands` survive a rebuild.
+
 ### Added (review and corrections)
 - **Locked lines:** `dev-titles fix-line <out> --lang --find --replace` corrects a translated line and locks it;
   no automatic step (editor, repair, term pins, re-runs) changes a locked line again.
