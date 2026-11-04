@@ -128,7 +128,6 @@ def test_codex_translator_retries_empty_output(monkeypatch):
 def test_asr_engine_auto(monkeypatch):
     import importlib.util
     import platform
-    import sys
 
     from dev_titles import cli
 
@@ -136,11 +135,11 @@ def test_asr_engine_auto(monkeypatch):
     monkeypatch.setattr(importlib.util, "find_spec", lambda n: object() if n in have else None)
     monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
     assert cli._resolve_engine("whisper") == "whisper"  # explicit choice untouched
-    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
     have.update({"parakeet_mlx", "whisperx"})
     assert cli._resolve_engine("auto") == "whisper"  # Parakeet needs Apple Silicon
-    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     monkeypatch.setattr(platform, "machine", lambda: "arm64")
     assert cli._resolve_engine("auto") == "parakeet"
     have.clear()
