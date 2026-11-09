@@ -50,7 +50,7 @@ def _string_literals(path):
 
 def test_no_hardcoded_temp_or_home_paths():
     offenders = []
-    for base in ("src", "scripts"):
+    for base in ("src", "scripts", "tools"):
         for p in (ROOT / base).rglob("*.py"):
             for line, s in _string_literals(p):
                 if BAD.match(s):

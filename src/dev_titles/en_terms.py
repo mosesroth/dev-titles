@@ -61,7 +61,7 @@ def normalize(
     return text, changes
 
 
-def apply(en: Subtitle, terms=None, aliases=None) -> tuple[Subtitle, list[dict]]:
+def apply(en: Subtitle, terms=None, aliases=None, max_cpl: int = 42) -> tuple[Subtitle, list[dict]]:
     """Normalize every cue; returns (subtitle, [{cue, found, approved}])."""
     if terms is None:
         terms, aliases = load()
@@ -74,5 +74,13 @@ def apply(en: Subtitle, terms=None, aliases=None) -> tuple[Subtitle, list[dict]]
             new, ch = normalize(ln, terms, aliases or {})
             lines.append(new)
             log += [{"cue": k, "found": a, "approved": b} for a, b in ch]
+        if lines != list(c.lines) and any(len(x) > max_cpl for x in lines):
+            # a longer approved spelling ('Vatoo' -> 'Vantoo') can push a line over the limit:
+            # re-wrap the cue (three 43-char lines once blocked the gate this way)
+            from .en_cleanread import wrap2
+
+            rewrapped = wrap2(" ".join(lines), max_cpl)
+            if len(rewrapped) <= 2 and all(len(x) <= max_cpl for x in rewrapped):
+                lines = rewrapped
         out.append(Cue(c.start, c.end, lines, getattr(c, "index", None)))
     return (Subtitle(en.language, out) if log else en), log

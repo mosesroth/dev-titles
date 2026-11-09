@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import degraded as _degraded
 from .config import spec_for
 from .glossary import EnforcementIssue, Glossary
 from .model import Subtitle
@@ -227,7 +228,7 @@ def _zh_polite_you(text: str) -> str:
     return _re.sub(r"(?<![迷])你(?!们)(?!好(?=[，,。！!？?」』\s]|$))", "您", text)
 
 
-def coverage_missing(invoke, src: str, tgt: str, tgt_lang_name: str) -> str:
+def coverage_missing(invoke, src: str, tgt: str, tgt_lang_name: str, note: str = "") -> str:
     """Source-anchored enumerate-then-verify omission gate: decompose the SOURCE
     into atomic propositions and check each is realized in the TARGET. Returns the
     substantive content NOT realized (empty if complete). Ignores pronoun/article/
@@ -243,7 +244,16 @@ def coverage_missing(invoke, src: str, tgt: str, tgt_lang_name: str) -> str:
         f"intensifiers, greetings, or discourse filler (welcome / a little bit / "
         f"happy coding / you know) — a subtitler is expected to condense those. "
         f"After the list, if every unit is PRESENT output a final line 'COMPLETE', "
-        f"else 'INCOMPLETE'.\n\nSOURCE: {src}\n\nTARGET ({tgt_lang_name}): {tgt}"
+        f"else 'INCOMPLETE'.\n\nSOURCE: {src}\n"
+        # a verified meaning note: a target that conveys the meaning is PRESENT without the literal
+        # words ('lexical analysis' = reading code as text — not missing because 字句解析 is absent)
+        + (
+            f"INTENDED MEANING (verified): {note} — a target conveying this meaning realizes the "
+            f"unit, even without the literal or technical term.\n"
+            if note
+            else ""
+        )
+        + f"\nTARGET ({tgt_lang_name}): {tgt}"
     )
     if "INCOMPLETE" not in verdict.upper() and "MISSING:" not in verdict.upper():
         return ""
@@ -373,6 +383,13 @@ def _line_context(i: int, sents, spk: list[str], video_vocab, k: int = 2, lang: 
     )
 
 
+# first names that are also everyday English words: never kept Latin on their own
+_COMMON_FIRST_NAMES = set(
+    "will may mark bill frank grant rose june april august hope faith joy pat sky summer dawn "
+    "drew chase rich hunter page bob gene jack jean max ray bud art guy sue carol penny".split()
+)
+
+
 def keep_latin_terms(glossary, video_vocab, lang: str = "") -> list[str]:
     """SINGLE source of truth for 'keep this Latin' (DNT) terms, unified across EVERY source
     so none is a separate crack (a term slipping through one source while masked by another). Collects:
@@ -427,6 +444,21 @@ def keep_latin_terms(glossary, video_vocab, lang: str = "") -> list[str]:
                 ]
             )
             if not _glossary_translates(t)
+        ]
+        # a person's first name used alone ('Thanks, Dario') is their name too: 'Dario Velasco'
+        # was kept Latin but 'Dario' became ダリオ / 达里奥 in the same tracks.
+        # Not a first name that is also a common word ('Will', 'Mark', 'Bill', 'May').
+        dnt += [
+            n.split()[0]
+            for n in video_vocab.get("names", []) or []
+            if len(n.split()) >= 2
+            # any capitalized Latin-script name: Émile, Óscar, Łukasz as well as Dario
+            and n.split()[0][:1].isupper()
+            and re.fullmatch(r"[^\W\d_][^\W\d_'’-]*(?:['’-][^\W\d_]+)*", n.split()[0])
+            and len(n.split()[0]) >= 3
+            and not re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", n.split()[0])
+            and n.split()[0].lower() not in _COMMON_FIRST_NAMES
+            and not _glossary_translates(n.split()[0])
         ]
         for _m in video_vocab.get("renderings", {}).values():
             for _src, _spec in (_m or {}).items():
@@ -616,6 +648,29 @@ def _load_cache(
     return cache, cache_by_src
 
 
+def _lock_survives(rec, new_src: str) -> bool:
+    """A locked translation still fits an edited English line: the edit is small, and no English
+    word it removed is written in the translation (a name fixed in the EN, 'Lukash' -> 'Łukasz',
+    would leave the locked target with the old name)."""
+    import difflib
+
+    old_w, new_w = rec.src.split(), new_src.split()
+    if difflib.SequenceMatcher(None, old_w, new_w, autojunk=False).ratio() < 0.85:
+        return False
+    ow = {w.strip(".,!?;:'\"").lower() for w in old_w}
+    nw = {w.strip(".,!?;:'\"").lower() for w in new_w}
+    gone, added = ow - nw, nw - ow
+    # a word swapped for another ('clip' -> 'cliff') or dropped; never new content the locked
+    # translation can't contain ('that local model clip' -> 'that broken local model clip')
+    if len(added) > len(gone) or len(added) > 2:
+        return False
+    txt = (rec.txt or "").lower()
+    # whole Latin words only: a removed 'app' is not in 'create-expo-app'
+    return not any(
+        len(w) >= 3 and re.search(rf"(?<![a-z0-9-]){re.escape(w)}(?![a-z0-9-])", txt) for w in gone
+    )
+
+
 def _reuse_record(i, s, cache, cache_by_src, g, lang, normalize, logger):
     """A record rebuilt from the cache for this UNCHANGED source, or None to (re-)translate.
 
@@ -624,6 +679,22 @@ def _reuse_record(i, s, cache, cache_by_src, g, lang, normalize, logger):
     translation of the OLD text and never re-translate the fix; on any change, fall back to the
     by-source index (a segmentation shift), else re-translate."""
     reuse = cache[i] if (i in cache and cache[i].src == s.text) else cache_by_src.get(s.text)
+    if reuse is None and i in cache and cache[i].locked:
+        # a LOCKED line whose English was edited a little since ('local model clip' -> 'cliff', a
+        # slip fix carried in from the delivered EN): the lock used to vanish with the cache miss and
+        # the line silently re-translated, undoing the operator's choice
+        kept = _lock_survives(cache[i], s.text)
+        logger(
+            f"{lang}: locked #{i} "
+            + (
+                "kept — its English changed only slightly"
+                if kept
+                else "RE-TRANSLATED — its English changed; lock it again if the new line needs it"
+            )
+            + f": {cache[i].src!r} -> {s.text!r}"
+        )
+        if kept:
+            return SentenceRecord(lang, i, s.text, cache[i].txt, "", [], locked=True), []
     if reuse is None:
         return None
     if (
@@ -958,14 +1029,17 @@ def _omission_gate(
 def _coverage_editfix(invoke, g, s, lang, lang_name, txt, iss, rounds, logger, i):
     """Source-anchored coverage gate + edit-in-place repair. Bounded; anything still
     missing is returned as `residual` (flagged for the editor, never silently dropped)."""
-    cmiss = coverage_missing(invoke, s.text, txt, lang_name)
+    from .translation_qe import _intended
+
+    note = _intended(i)
+    cmiss = coverage_missing(invoke, s.text, txt, lang_name, note)
     bt = 0
     while cmiss and bt < rounds:
         bt += 1
         logger(f"{lang}: coverage EDIT-fix {bt} #{i} missing: {cmiss[:80]}")
         cand = edit_fix(invoke, s.text, txt, cmiss, lang_name)
         cand, ci = g.enforce(cand, s.text, lang)
-        nc = coverage_missing(invoke, s.text, cand, lang_name)
+        nc = coverage_missing(invoke, s.text, cand, lang_name, note)
         if len(nc) < len(cmiss):
             txt, iss, cmiss = cand, ci, nc
         else:
@@ -1327,6 +1401,9 @@ def _localize_en_impl(
         native_editor=native_editor,
         logger=logger,
     )
+    from .translation_qe import set_meaning_notes
+
+    set_meaning_notes({})  # never the previous video's notes, whether or not this one computes any
     if run.qe_invoke is not None and native_editor:
         _prepare_video(run)
     outputs: list[LangOutput] = []
@@ -1393,9 +1470,10 @@ def _review_fix_pass(run: "_Run", L: "_LangRun", others: list) -> None:
             [j for j in (run.qe_invoke, run.qe_second_judge) if j],
             other=other,
             logger=run.logger,
+            notes=(run.video_vocab or {}).get("meaning_notes"),
         )
     except Exception as e:  # never sink a run on it
-        run.logger(f"{L.lang}: review-and-fix skipped ({type(e).__name__})")
+        run.logger(f"{_degraded.note(f'{L.lang}: review-and-fix', e)}")
         return
     fixed = {e["i"] for e in log if e["status"] == "fixed"}
     L.suspects = [s for s in L.suspects if s.get("i") not in fixed]
@@ -1459,7 +1537,7 @@ def _add_speakers(run: _Run, brief: str) -> None:
             logger=run.logger,
         )
     except Exception as e:  # never sink a run on speaker labeling
-        run.logger(f"speaker labeling skipped ({type(e).__name__})")
+        run.logger(f"{_degraded.note('speaker labeling', e)}")
         spk = []
     if spk:
         run.video_vocab = {**(run.video_vocab or {}), "speakers": spk}
@@ -1478,10 +1556,23 @@ def _add_meaning_notes(run: _Run, brief: str) -> None:
             verify=run.qe_second_judge,  # disputed notes are dropped (and held at the EN sign-off)
         )
     except Exception as e:  # never sink a run on it
-        run.logger(f"meaning notes skipped ({type(e).__name__})")
+        run.logger(f"{_degraded.note('meaning notes', e)}")
         mn = {}
+    from .translation_qe import note_covers, set_meaning_notes
+
+    # set now, not at QE: the coverage gate and the term-pin harvest read them too; always (an
+    # empty set clears the previous video's in a multi-video process)
+    set_meaning_notes(mn or {})
     if mn:
         run.video_vocab = {**(run.video_vocab or {}), "meaning_notes": mn}
+        # a term pin persisted by an earlier run for a phrase a note settles is dropped (vocab.json
+        # keeps it; a later run without the note would get it back)
+        for lang, rend in ((run.video_vocab or {}).get("renderings") or {}).items():
+            for src in [k for k in (rend or {}) if note_covers(k)]:
+                rend.pop(src)
+                run.logger(
+                    f"{lang}: per-video rendering {src!r} dropped (a meaning note settles it)"
+                )
         run.logger(
             f"meaning notes: {sum(len(v) for v in mn.values())} phrase(s) resolved for the translators"
         )
@@ -1501,7 +1592,7 @@ def _apply_names_policy(run: _Run, brief: str) -> None:
             brief=brief,
         )
     except Exception as e:  # never sink a run on it
-        run.logger(f"names policy skipped ({type(e).__name__})")
+        run.logger(f"{_degraded.note('names policy', e)}")
         pol = {}
     if pol.get("ordinary_products"):
         try:
@@ -1518,7 +1609,7 @@ def _apply_names_policy(run: _Run, brief: str) -> None:
                 logger=run.logger,
             )
         except Exception as e:
-            run.logger(f"official-name lookup skipped ({type(e).__name__})")
+            run.logger(f"{_degraded.note('official-name lookup', e)}")
     if pol.get("companies") or pol.get("ordinary_products") or pol.get("named_concepts"):
         run.video_vocab = apply_policy(run.video_vocab, pol, run.langs)
         run.logger(
@@ -1692,9 +1783,11 @@ def _review_pass(run: _Run, L: _LangRun) -> None:
         build_judges,
         incremental_review,
         load_qe_state,
+        set_meaning_notes,
         translation_suspects,
     )
 
+    set_meaning_notes((run.video_vocab or {}).get("meaning_notes"))
     L.qe_state_path = run.path(f"qe_state.{L.lang}.json")
     L.prior = load_qe_state(L.qe_state_path) if L.qe_state_path else None
     if L.prior is not None and run.qe_invoke is not None:
@@ -1785,7 +1878,18 @@ def _qe_repair_pass(run: _Run, L: _LangRun) -> None:
     """QE-guided auto-repair (Layer B): re-translate judge-flagged majors + deterministic garbles
     with the critique as a constraint; accept only if the full panel's re-judge improves. Native-
     editor rewrites are PROTECTED, and every repair must also win a native-viewer pairwise check."""
-    if not (run.qe_repair and L.dqf is not None and (L.prior is None or L.has_major)):
+    if not (run.qe_repair and L.dqf is not None):
+        return
+    # a coined term with a meaning note, rendered two ways in this track — checked on every run,
+    # not only when a major is flagged (a track can be clean except for this)
+    try:
+        from .translation_qe import noted_term_inconsistencies
+
+        noted = noted_term_inconsistencies(L.records, run.qe_invoke, L.name)
+    except Exception as e:
+        run.logger(_degraded.note(f"{L.lang}: coined-term consistency check", e))
+        noted = []
+    if not (L.prior is None or L.has_major or noted):
         return
     from .editor import editor_rewritten, repair_check
     from .translation_qe import build_judges
@@ -1811,6 +1915,9 @@ def _qe_repair_pass(run: _Run, L: _LangRun) -> None:
             if s["i"] is not None and s["kind"] in ("dropped-token", "latin-typo?")
         }
     )
+    for s in noted:
+        run.logger(f"{L.lang}: {s['detail']}")
+    L.suspects = L.suspects + noted
     # term-inconsistency -> repair the offending cues toward the canonical rendering
     extra_crit: dict[int, str] = {}
     for s in L.suspects:
@@ -2027,7 +2134,7 @@ def _latin_name_consistency(run: _Run, L: _LangRun) -> None:
                 sources=how,
             )
         except Exception as e:  # never sink a run on it
-            run.logger(f"{L.lang}: Latin-name check skipped ({type(e).__name__})")
+            run.logger(f"{_degraded.note(f'{L.lang}: Latin-name check', e)}")
             verdict = {}
         for n in never:
             if verdict.get(n) == "latin":

@@ -196,3 +196,49 @@ def test_retime_target_moves_a_late_run_into_its_spoken_window():
         for o in content_speech_desync(new, en, _speech(), inv, lang_name="Chinese")["off"]
         if o["severity"] == "error"
     ]
+
+
+def test_speech_words_for_run_prefers_asr_then_ingest_captions_then_download(tmp_path, monkeypatch):
+    import json
+
+    from dev_titles.validate import speech_sync as ss
+
+    calls = []
+    monkeypatch.setattr(
+        ss, "speech_words_for", lambda vid, cache: calls.append(vid) or [("dl", 0.0)]
+    )
+    run = tmp_path / "Video"
+    (run / "_ingest").mkdir(parents=True)
+    assert ss.speech_words_for_run(run, "abc") == [("dl", 0.0)] and calls == ["abc"]
+    assert ss.speech_words_for_run(run) == []  # no id, nothing local: no download attempted
+    # a word-timed caption from ingest beats the download
+    words = "".join(
+        f"00:00:{k:02d}.000 --> 00:00:{k + 1:02d}.000\nw{k}<00:00:{k:02d}.500><c> x{k}</c>\n\n"
+        for k in range(40)
+    )
+    (run / "_ingest" / "abc.en.vtt").write_text("WEBVTT\n\n" + words, encoding="utf-8")
+    got = ss.speech_words_for_run(run, "abc")
+    assert got and got[0][0] != "dl" and calls == ["abc"]
+    # our ASR words beat both
+    (run / "raw.json").write_text(
+        json.dumps([{"text": "Hello", "start": 1.5, "end": 2.0}]), encoding="utf-8"
+    )
+    assert ss.speech_words_for_run(run, "abc") == [("hello", 1.5)]
+
+
+def test_a_corrupt_local_speech_file_falls_through_to_the_next_source(tmp_path, monkeypatch):
+    from dev_titles.validate import speech_sync as ss
+
+    monkeypatch.setattr(ss, "speech_words_for", lambda vid, cache: [("dl", 0.0)])
+    (tmp_path / "raw.json").write_text("{not json", encoding="utf-8")
+    assert ss.speech_words_for_run(tmp_path, "abc") == [("dl", 0.0)]
+
+
+def test_check_upload_reads_speech_from_the_run_folder_first():
+    from pathlib import Path
+
+    s = (Path(__file__).resolve().parents[1] / "scripts" / "check_upload.py").read_text(
+        encoding="utf-8"
+    )
+    assert "speech_words_for_run(run," in s and "speech_words_for_run," in s
+    assert "else speech_words_for(vid," in s  # no run folder: the download is the last resort

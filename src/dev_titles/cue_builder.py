@@ -114,7 +114,7 @@ def strip_sound_tags(sub: Subtitle) -> Subtitle:
     """Remove non-speech sound tags ([music], (applause), [laughter], ♪…) from caption cues — the
     cue-level twin of strip_nonspeech_cues (which only runs on ASR word streams inside
     build_en_cues). Without it, `localize` on a clean human caption passed '[music]' straight into
-    translation (BuilderToolsAI ja got '[音楽]'). A cue left empty is dropped."""
+    translation (a ja track shipped '[音楽]'). A cue left empty is dropped."""
     out = []
     for c in sub.cues:
         lines = [strip_artifacts(ln) for ln in c.lines]

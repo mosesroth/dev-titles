@@ -53,6 +53,73 @@ def resolve_input(spec: str, workdir: str | Path = "output/_ingest") -> Resolved
     raise ValueError(f"unsupported input type {ext!r}: {spec}")
 
 
+def _download(yt_dlp, url: str, opts: dict, waits=(), sleep=None):
+    """extract_info with the auto-captions; on a rate limit (HTTP 429) wait and retry, then go on
+    WITHOUT the auto-captions — they are an optional cross-check, and on 2026-11-04 a 429 on them
+    failed six queued runs at the first step. No waits by default: the 429 is a missing PO token,
+    not a rate limit, and waiting never helped; transcript_captions() fetches the captions instead.
+    """
+    import time
+
+    sleep = sleep or time.sleep
+    no_caps = {**opts, "writeautomaticsub": False}
+    attempts = [(opts, w) for w in waits] + [(no_caps, None)]
+    for k, (o, wait) in enumerate(attempts):
+        try:
+            with yt_dlp.YoutubeDL(o) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return info, ydl.prepare_filename(info)
+        except yt_dlp.utils.DownloadError as e:
+            if "429" not in str(e) or wait is None:
+                raise
+            last = k == len(attempts) - 2
+            print(
+                f"YouTube rate limit (429); retrying in {wait}s"
+                + (" without the auto-captions" if last else "")
+            )
+            sleep(wait)
+    raise RuntimeError("unreachable")
+
+
+def transcript_captions(video_id: str, out: Path, fetch=None) -> str:
+    """The English auto-captions via YouTube's transcript endpoint, written as VTT; '' if unavailable.
+
+    yt-dlp's caption download needs a PO token now ("PO Token Providers: none" -> HTTP 429 on
+    /api/timedtext for every player client, 2026-11-04), so the four runs that day went without the
+    auto-caption cross-check — the one that fixes ASR mishears like "done into NWA" (end-to-end).
+    The transcript endpoint (youtube-transcript-api) serves the same captions without one."""
+    try:
+        if fetch is None:
+            from youtube_transcript_api import YouTubeTranscriptApi
+
+            fetch = YouTubeTranscriptApi().fetch
+        snippets = list(fetch(video_id, languages=["en"]))
+    except Exception as e:  # optional cross-check: never fail the run over it
+        print(f"auto-captions unavailable ({type(e).__name__}); continuing without them")
+        return ""
+
+    def ts(t: float) -> str:
+        h, rem = divmod(max(t, 0.0), 3600)
+        m, sec = divmod(rem, 60)
+        return f"{int(h):02d}:{int(m):02d}:{sec:06.3f}"
+
+    cues = []
+    for k, s in enumerate(snippets):
+        end = s.start + s.duration
+        if k + 1 < len(
+            snippets
+        ):  # captions roll: a snippet ends where the next starts at the latest
+            end = min(end, snippets[k + 1].start) or end
+        text = " ".join((s.text or "").split())
+        if text:
+            cues.append(f"{ts(s.start)} --> {ts(end)}\n{text}\n")
+    if not cues:
+        return ""
+    out.write_text("WEBVTT\n\n" + "\n".join(cues), encoding="utf-8")
+    print(f"auto-captions: {len(cues)} cues via the transcript endpoint -> {out.name}")
+    return str(out)
+
+
 def _resolve_youtube(url: str, workdir: Path) -> ResolvedInput:
     try:
         import yt_dlp
@@ -73,9 +140,7 @@ def _resolve_youtube(url: str, workdir: Path) -> ResolvedInput:
         "subtitleslangs": ["en", "en-orig"],
         "subtitlesformat": "vtt",
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
+    info, path = _download(yt_dlp, url, opts)
     meta = "\n".join(
         x
         for x in (info.get("title", ""), info.get("uploader", ""), info.get("description", ""))
@@ -91,6 +156,8 @@ def _resolve_youtube(url: str, workdir: Path) -> ResolvedInput:
     if not auto_cap:
         hits = sorted(workdir.glob(f"{vid}*.vtt"))
         auto_cap = str(hits[0]) if hits else ""
+    if not auto_cap and vid:
+        auto_cap = transcript_captions(vid, workdir / f"{vid}.en.vtt")
     return ResolvedInput(
         "media",
         path,

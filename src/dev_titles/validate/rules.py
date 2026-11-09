@@ -43,7 +43,12 @@ class Violation:
 
 
 _COMMENTARY = re.compile(
-    r"\*\*|```|\b(?:Changes made|Explanation|Note|Rationale|Corrected (?:line|translation))\s*:",
+    r"\*\*|```|\b(?:Changes made|Explanation|Note|Rationale|Corrected (?:line|translation))\s*:"
+    # an editor's working notes in a transcript ('"most,ly like" -> "mostly"', 'is backchannel — drop')
+    r'|"\s*->\s*"|\bis (?:backchannel|a lead-in|a false start)\b|\s—\s*drop\b|\bdrop\? Keep\b'
+    # a model answering an instruction planted in the prompt ('I don't have a shell or web tool…')
+    r"|\bI (?:don't|do not|can't|cannot) (?:have|use|access) (?:a |any |the )?"
+    r"(?:shell|terminal|tools?|web|internet|browser)\b",
     re.I,
 )
 

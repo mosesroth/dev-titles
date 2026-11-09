@@ -129,3 +129,47 @@ def test_term_consistency_only_unifies_toward_the_majority():
     assert adjudicate.candidates("zh-Hans", "Chinese", recs, [], invoke=lambda p: to_minority) == {}
     to_majority = '[{"term": "tile", "use": "图块", "ids": [2]}]'
     assert 2 in adjudicate.candidates("zh-Hans", "Chinese", recs, [], invoke=lambda p: to_majority)
+
+
+def test_review_and_fix_sees_the_verified_meaning_of_a_line():
+    """'scratch the surface' (operator: start looking into it) was once 'fixed' to 'a brief
+    look' because the fix and its judges never saw the note."""
+    import types
+
+    from dev_titles.adjudicate import review_and_fix
+
+    rec = types.SimpleNamespace(
+        i=9, src="Let me scratch the surface.", txt="まずは調べてみます", locked=False
+    )
+    prompts = []
+
+    def invoke(p):
+        prompts.append(p)
+        return "NO_CHANGE"
+
+    sus = [{"i": 9, "kind": "mqm-minor[claude]", "detail": "loses the sense of a quick look"}]
+    notes = {9: [{"phrase": "scratch the surface", "meaning": "idiom: start looking into it"}]}
+    log = review_and_fix("ja", "Japanese", [rec], sus, invoke, [], notes=notes)
+    fix = [p for p in prompts if "senior native" in p][0]
+    assert "INTENDED MEANING" in fix and "start looking into it" in fix
+    assert log[0]["status"] == "not real" and rec.txt == "まずは調べてみます"
+
+
+def test_review_and_fix_coverage_check_sees_the_meaning_note(monkeypatch):
+    """A fix that follows the operator's meaning is not an 'omission' of the literal term."""
+    recs = [_r(0, "We can't rely on our lexical analysis.", "字句解析には頼れない")]
+    sus = [{"kind": "mqm-major[codex]", "i": 0, "detail": "compiler sense"}]
+    seen = []
+    monkeypatch.setattr(adjudicate, "coverage_missing", lambda *a: seen.append(a) or "")
+    notes = {0: [{"phrase": "lexical analysis", "meaning": "reading code as text"}]}
+    adjudicate.review_and_fix(
+        "ja",
+        "Japanese",
+        recs,
+        sus,
+        lambda p: "コードをテキストとして読むやり方には頼れない" if "ISSUES" in p else "[]",
+        [lambda p: '{"better": "A"}'],
+        logger=lambda m: None,
+        notes=notes,
+    )
+    assert seen and '"lexical analysis" = reading code as text' in seen[0][-1]

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 """learn.py: triage, in-memory lesson, validation verdicts, comment-preserving glossary writes."""
 
 import random
@@ -145,8 +147,14 @@ def test_triage_adds_a_missing_language_rendering():
 def test_reviewer_counterevidence(tmp_path):
     from dev_titles.learn import reviewer_counterevidence
 
-    (tmp_path / "Other.ja.srt").write_text(
+    # the reviewer corpus layout: <reviewed>/<batch>/<video>.<lang>_Reviewed.srt — found at any
+    # depth, and the video the lesson came from is skipped (it is not counter-evidence)
+    (tmp_path / "batch1").mkdir()
+    (tmp_path / "batch1" / "Other.ja_Reviewed.srt").write_text(
         "1\n00:00:01,000 --> 00:00:02,000\nサイドプロジェクトです\n", encoding="utf-8"
+    )
+    (tmp_path / "batch1" / "SkipMe.ja_Reviewed.srt").write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nサイドプロジェクト\n", encoding="utf-8"
     )
     x = {
         "kind": "glossary_term",
@@ -177,3 +185,78 @@ def test_fixed_line_needs_an_established_corpus_rendering():
     steady = [("Thank you.", "ありがとうございました", v) for v in "aabb"]
     assert fixed_line_established(x, steady)[0]
     assert not fixed_line_established({**x, "source": "Sure."}, steady)[0]  # never in the corpus
+
+
+def _srt(text):
+    return f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n"
+
+
+def test_conventions_find_a_house_term_judges_cannot_know(tmp_path):
+    """Web -> 网页 in 3 videos (20261104_CN): a Latin draft word replaced consistently."""
+    from dev_titles.learn import convention_lessons, conventions
+
+    rows = [
+        {"video": v, "en": en, "ours": o, "human": h}
+        for v, en, o, h in [
+            ("A", "web developers", "Web开发者都能用上", "网页开发者都能用上"),
+            ("A", "port it from the web", "把应用从Web移植过来", "把应用从网页移植过来"),
+            ("B", "I did web development", "我做Web开发的头四年", "我做网页开发的头四年"),
+            ("C", "catch up with web", "努力追上Web", "努力追上网页"),
+            ("C", "a question?", "开发者为什么要关注它呢", "开发者为什么要关注它呢？"),
+            ("A", "right?", "关键是赋能，对吧", "关键是赋能，对吧？"),
+            ("B", "is it there?", "是在GitHub上吗", "是在GitHub上吗？"),
+        ]
+    ]
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "D.zh-Hans_Reviewed.srt").write_text(_srt("没有相关内容"), encoding="utf-8")
+    words, punct = conventions(rows, "zh-Hans", tmp_path)
+    assert [(w["from"], w["to"], len(w["videos"])) for w in words] == [("Web", "网页", 3)]
+    assert any(p["to"] == "？" and len(p["videos"]) == 3 for p in punct)
+
+    def invoke(prompt):
+        return '[{"id": 0, "term": "web", "kind": "terminology", "why": "house term"}]'
+
+    lessons, rest = convention_lessons(words, invoke, "zh-Hans")
+    assert [(x["source"], x["target"], x["avoid"]) for x in lessons] == [("web", "网页", ["Web"])]
+    assert not rest
+
+
+def test_convention_rejected_when_reviewers_keep_the_draft_word(tmp_path):
+    from dev_titles.learn import convention_lessons, conventions
+
+    rows = [
+        {"video": v, "en": "web app", "ours": "Web应用很好", "human": "网页应用很好"} for v in "ABC"
+    ]
+    (tmp_path / "b").mkdir()
+    for v in ("D", "E"):  # other reviewers keep "Web" — a contextual choice, not a rule
+        (tmp_path / "b" / f"{v}.zh-Hans_Reviewed.srt").write_text(_srt("Web版"), encoding="utf-8")
+    words, _ = conventions(rows, "zh-Hans", tmp_path)
+    lessons, rest = convention_lessons(
+        words, lambda p: '[{"id": 0, "term": "web", "kind": "terminology"}]', "zh-Hans"
+    )
+    assert not lessons and "keep it elsewhere=2" in rest[0]["not_a_lesson"]
+
+
+def test_learn_batch_ledger_skips_done_and_finds_missing(tmp_path, monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "lrb", Path(__file__).resolve().parents[1] / "scripts" / "learn_review_batch.py"
+    )
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)  # type: ignore[union-attr]
+    monkeypatch.setattr(m, "REVIEWED", tmp_path / "reviewed")
+    monkeypatch.setattr(m, "LEARN", tmp_path / "learn")
+    monkeypatch.setattr(m, "LEDGER", tmp_path / "learn" / "ledger.json")
+    for b, v in (("batch1", "FirstVideo"), ("batch2", "SecondVideo")):
+        (tmp_path / "reviewed" / b).mkdir(parents=True)
+        (tmp_path / "reviewed" / b / f"{v}.zh-Hans_Reviewed.srt").write_text(_srt("x"), "utf-8")
+    m._save_ledger({"batch1/FirstVideo/zh-Hans": {"status": "done"}})
+    seen = []
+    monkeypatch.setattr(
+        m, "learn_video", lambda b, v, lang, p, apply: seen.append(f"{b}/{v}") or {"status": "done"}
+    )
+    monkeypatch.setattr(m, "corpus_pass", lambda lang, apply, invoke: [])
+    assert m.main(["--missing", "--no-apply"]) == 0
+    assert seen == ["batch2/SecondVideo"]
+    assert m.ledger()["batch2/SecondVideo/zh-Hans"]["status"] == "done"

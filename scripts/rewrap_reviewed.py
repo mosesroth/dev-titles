@@ -6,8 +6,8 @@ Per cue: if a line exceeds max_cpl or the cue has too many lines, re-wrap the cu
 house wrapper; if it still needs more than max_lines, split the cue across its own time window
 (resegment_translation). Untouched cues are copied verbatim. Tiny sub-frame gaps are snapped.
 
-A ja 、/。 becomes a half-/full-width space (JP subtitle style-guide rule) — the only text edit,
-reported.
+A ja 、/。 becomes a half-/full-width space (JP subtitle style-guide rule) and a zh ，、； at a line
+end is dropped (the line break is itself the pause) — the only text edits, reported.
 
 Run: PYTHONPATH=src python3 scripts/rewrap_reviewed.py "<dir>" --out <outdir>
 """
@@ -111,7 +111,9 @@ def _split_n(text, n):
     return [p for p in parts if p]
 
 
-def glossary_audit(sub, lang, glossary_path="glossary/glossary.yaml"):
+def glossary_audit(
+    sub, lang, glossary_path=str(Path(__file__).resolve().parents[1] / "glossary" / "glossary.yaml")
+):
     from dev_titles.glossary import load
 
     g = load(glossary_path)
@@ -149,6 +151,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="don't start learn_review_batch.py (check_vendor_review.py starts it itself)",
+    )
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -171,6 +178,12 @@ def main():
                     for ln in lines
                 ]
                 punct += sum(ln.count("、") + ln.count("。") for ln in lines)
+                lines = new
+            elif lang.startswith("zh"):
+                # CN subtitle SG: no ，、； at a line end — the line break is the pause (wrap_lines
+                # strips them in our own output; vendor files have been seen with two left)
+                new = [re.sub(r"[，、；]+\s*$", "", ln) for ln in lines]
+                punct += sum(a != b for a, b in zip(lines, new))
                 lines = new
             bad = len(lines) > spec.max_lines or any(
                 display_width(ln, cjk=True) > spec.max_cpl for ln in lines
@@ -206,6 +219,12 @@ def main():
         # 'in-app purchase' where the glossary says アプリ内課金).
         for hit in glossary_audit(res, lang):
             print(f"      glossary: {hit}")
+    if not a.no_learn and any("Reviewed" in f.name for f in Path(a.src).glob("*.srt")):
+        # learn from the review: automatic, never a separate step (learn_review_batch.py)
+        sys.path.insert(0, str(Path(__file__).parent))
+        from learn_review_batch import launch_detached
+
+        launch_detached(a.src)
 
 
 if __name__ == "__main__":

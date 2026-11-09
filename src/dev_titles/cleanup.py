@@ -422,6 +422,21 @@ def dedupe_adjacent_words(text: str) -> str:
     return "".join(out)
 
 
+_NOTES = re.compile(
+    r'"\s*->|->\s*"|\b(?:false start|backchannel|lead-in|restart)\b|\bdrop\?|\bKeep "',
+    re.I,
+)
+
+
+def editing_notes(out: str, src: str, max_ratio: float = 1.3) -> bool:
+    """The correction's output carries the model's own editing notes, or grew far beyond its input
+    (a clean read only removes). Markers that are already in the source don't count."""
+    if any(m.group(0).lower() not in src.lower() for m in _NOTES.finditer(out)):
+        return True
+    n = len(src.split())
+    return n >= 8 and len(out.split()) > max_ratio * n
+
+
 def _correct_chunk(invoke, c, terms, here, clean_read, names, *, min_ratio: float = 0.72) -> str:
     """Correct one chunk, with a COMPLETENESS SAFEGUARD: clean-read legitimately drops
     filler and merges spelled-out identifiers (some shrinkage is fine), but it must not
@@ -430,6 +445,16 @@ def _correct_chunk(invoke, c, terms, here, clean_read, names, *, min_ratio: floa
     and if it's still short, keep the ORIGINAL chunk (verbatim beats dropped)."""
     out = invoke(build_correction_prompt(c, terms, here, clean_read, names)).strip() or c
     n = len(c.split())
+    if editing_notes(out, c):
+        # the model 'thought aloud' into the transcript (a shipped EN carried its notes:
+        # '"most,ly like" -> "mostly".', '"All right" is backchannel — drop.') — retry once,
+        # else keep the raw chunk: a verbatim line beats an editor's note on screen
+        retry = invoke(
+            build_correction_prompt(c, terms, here, clean_read, names)
+            + "\nIMPORTANT: output ONLY the corrected transcript text. No notes, no quotes around "
+            "phrases, no arrows, no explanations of what you changed."
+        ).strip()
+        out = retry if retry and not editing_notes(retry, c) else c
     if n >= 8 and len(out.split()) < min_ratio * n:
         retry = invoke(
             build_correction_prompt(c, terms, here, clean_read, names)

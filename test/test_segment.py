@@ -425,7 +425,11 @@ def test_cjk_breaks_prefer_sentence_ends_and_merge_short_sentences():
     from dev_titles.resegment import resegment_translation
 
     txt = "両者は密接に結合しているべきではありません　しかしこれまでの動画ライブラリは"
-    assert wrap_lines(txt, ja)[:2] == ["両者は密接に", "結合しているべきではありません"]
+    import importlib.util
+
+    # the word-safe break needs the ja tokenizer (fugashi), an optional dependency
+    if importlib.util.find_spec("fugashi") is not None:
+        assert wrap_lines(txt, ja)[:2] == ["両者は密接に", "結合しているべきではありません"]
     first = resegment_translation(txt, 0.0, 6.0, ja)[0]
     assert first.lines[-1].endswith("ありません"), first.lines  # the cue ends with the sentence
     en = Subtitle(
@@ -556,3 +560,39 @@ def test_zh_tech_words_and_particles_stay_attached():
     assert not any(a.endswith("后") and b.startswith("端") for a, b in zip(lines, lines[1:])), lines
     lines = wrap_lines("这个发现很有意思也促使我们开始思考明年的路线图该怎么规划", zh)
     assert not any(ln.startswith(("的", "了", "们")) for ln in lines), lines
+
+
+def test_ja_compound_tail_kanji_stays_with_its_noun():
+    """転換|点, 開発|者: a single-kanji noun after a noun ends the compound."""
+    import importlib.util
+
+    if importlib.util.find_spec("fugashi") is None:
+        return  # the optional ja tokenizer is not installed
+    import fugashi
+
+    from dev_titles.segment.cjk import _ja_bunsetsu_positions
+
+    for text, word in (
+        ("ローカルモデルへの転換点につながるんです", "転換点"),
+        ("アプリの開発者にとって重要です", "開発者"),
+        ("ものすごく違和感があると思います", "違和感"),
+        ("あちこちに掃除機をかけたり", "掃除機"),
+    ):
+        pos = _ja_bunsetsu_positions(text, list(fugashi.Tagger()(text)))
+        k = text.index(word)
+        assert not any(k < p < k + len(word) for p in pos), (word, sorted(pos))
+        assert k in pos or text[k - 1] in "のへ"  # still breakable before the compound
+
+
+def test_ja_a_numeral_after_a_noun_is_still_a_break():
+    import importlib.util
+
+    if importlib.util.find_spec("fugashi") is None:
+        return
+    import fugashi
+
+    from dev_titles.segment.cjk import _ja_bunsetsu_positions
+
+    for text, at in (("課題一つひとつを", "一"),):
+        pos = _ja_bunsetsu_positions(text, list(fugashi.Tagger()(text)))
+        assert text.index(at) in pos, (text, sorted(pos))

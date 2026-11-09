@@ -11,19 +11,23 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = sorted(
     p
-    for p in (ROOT / "scripts").rglob("*.py")
+    for d in ("scripts", "tools")
+    for p in (ROOT / d).rglob("*.py")
     if p.parent.name != "hooks" and "argparse" in p.read_text(encoding="utf-8")
 )
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: str(p.relative_to(ROOT)))
-def test_script_help(script):
+def test_script_help(script, tmp_path):
+    # run from outside the repo: the operator runs these from the project folder, and a path
+    # relative to the repo root (scripts/rewrap_reviewed.py, glossary/glossary.yaml) broke
+    # check_vendor_review.py and retime_drifted.py there (2026-11-04)
     r = subprocess.run(
         [sys.executable, str(script), "--help"],
         capture_output=True,
         text=True,
         timeout=120,
-        cwd=ROOT,
+        cwd=tmp_path,
         env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"},
     )
     assert r.returncode == 0, r.stderr[-800:]

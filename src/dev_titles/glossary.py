@@ -16,7 +16,7 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:  # pragma: no cover - surfaced at load time
-    yaml = None
+    yaml = None  # type: ignore[assignment]
 
 
 @dataclass

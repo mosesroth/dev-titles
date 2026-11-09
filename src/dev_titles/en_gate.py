@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 APPROVAL = "en_approved.json"
+CROSSCHECK = "asr_crosscheck.json"
 STATE = "en_review.json"
 
 
@@ -86,7 +87,15 @@ def approve(out, en, by: str, note: str = "") -> dict:
 SPEECH_SYNC = (
     "speech_sync.json"  # written by cli._speech_align: EN cues out of sync with the speech
 )
-_MECHANICAL = ("sound_tag", "caption_artifact", "duplicate_text", "overlap", "max_lines", "max_cpl")
+_MECHANICAL = (
+    "sound_tag",
+    "caption_artifact",
+    "duplicate_text",
+    "overlap",
+    "max_lines",
+    "max_cpl",
+    "model_commentary",  # a model's notes left in the EN script
+)
 
 
 def mechanical_issues(en, out) -> list[dict]:
@@ -125,6 +134,39 @@ def mechanical_issues(en, out) -> list[dict]:
     return items
 
 
+def save_crosscheck(out, *, youtube: bool, auto_captions: bool, second_asr: bool) -> None:
+    Path(out, CROSSCHECK).write_text(
+        json.dumps({"youtube": youtube, "auto_captions": auto_captions, "second_asr": second_asr}),
+        encoding="utf-8",
+    )
+
+
+def crosscheck_missing(out) -> str:
+    """Why the EN's mishear cross-check didn't run ('' if it did, or isn't expected).
+
+    For a YouTube video the auto-captions are the independent third opinion that catches confident
+    ASR mishears ("done into NWA" for "end to end"); when they couldn't be fetched, a clean review
+    proves little, so the EN is held for a person instead of signing itself off."""
+    p = Path(out, CROSSCHECK)
+    if not p.exists():
+        return ""
+    rec = json.loads(p.read_text(encoding="utf-8"))
+    if rec.get("youtube") and not rec.get("auto_captions"):
+        return "the YouTube auto-captions couldn't be fetched, so no mishear cross-check ran"
+    return ""
+
+
+def signed_off(en, out) -> bool:
+    """A sign-off on record for this EN (same text; a re-timing doesn't void it)."""
+    p = Path(out, APPROVAL)
+    if not p.exists():
+        return False
+    rec = json.loads(p.read_text(encoding="utf-8"))
+    return rec.get("hash") == en_hash(en) or bool(
+        rec.get("text_hash") and rec["text_hash"] == text_hash(en)
+    )
+
+
 def check(en, out) -> tuple[bool, str, list[dict]]:
     """(ok, reason, open held items). Writes an automatic sign-off when the review held nothing.
     Mechanical defects (mechanical_issues) block even a signed-off EN."""
@@ -160,6 +202,9 @@ def check(en, out) -> tuple[bool, str, list[dict]]:
         )
     if stale:
         return False, stale, []
+    why = crosscheck_missing(out)
+    if why:
+        return False, f"{why} — listen-check the EN, then sign off (approve-en)", []
     approve(out, en, by="auto: EN review held nothing")
     return True, "EN signed off automatically (review held nothing)", []
 

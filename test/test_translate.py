@@ -506,3 +506,26 @@ def test_fixed_line_matches_whole_sentence_only():
     assert _fixed_line(g, "ja", "  sure. ") == "はい"
     assert _fixed_line(g, "ja", "Make sure.") is None
     assert _fixed_line(g, "zh-Hans", "Sure.") is None
+
+
+def test_mqm_judges_see_the_verified_meaning_of_a_line():
+    """A line that follows the operator's answer must not be scored as an error for it."""
+    from dev_titles import translation_qe as tq
+
+    seen = []
+    tq.set_meaning_notes(
+        {3: [{"phrase": "scratch the surface", "meaning": "idiom: start looking into it"}]}
+    )
+    try:
+        tq._judge_batch(
+            lambda p: seen.append(p) or "",
+            [(3, "Let me scratch the surface.", "まずは調べてみます"), (4, "Next.", "次")],
+            "Japanese",
+        )
+    finally:
+        tq.set_meaning_notes(None)
+    assert (
+        'INTENDED MEANING (verified): "scratch the surface" = idiom: start looking into it'
+        in seen[0]
+    )
+    assert seen[0].count("INTENDED MEANING (verified)") == 1

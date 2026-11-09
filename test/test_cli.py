@@ -70,13 +70,16 @@ def test_cli_translator_argv_and_stdin():
     tr = CliTranslator(binary="/bin/claude", runner=fake_runner, env={"ANTHROPIC_API_KEY": "k"})
     out = tr.translate(TranslationRequest("Submit your app", "en", "zh-Hans"))
     assert out == "提交您的应用"  # stripped
+    # no tools: prompts carry untrusted text, so the model must not be able to run anything
     assert seen["argv"] == [
         "/bin/claude",
         "-p",
         "--output-format",
         "text",
-        "--bare",
-    ]  # API key -> bare
+        "--bare",  # API key -> bare
+        "--tools",
+        "",
+    ]
     assert "--model" not in seen["argv"]
     assert "<TRANSLATE_THIS>" in seen["prompt"]  # prompt goes on stdin
 
@@ -157,6 +160,14 @@ def test_codex_cli_judge_argv_and_output():
     j = CodexCliJudge(binary="/bin/codex", model="openai.gpt-5.5", runner=fake_runner)
     out = j.invoke("judge this")
     assert out == "PARITY: 84\n\nanalysis..."  # stripped, from -o file
-    assert seen["argv"][:4] == ["/bin/codex", "exec", "--skip-git-repo-check", "-o"]
+    # read-only sandbox, explicitly
+    assert seen["argv"][:6] == [
+        "/bin/codex",
+        "exec",
+        "--skip-git-repo-check",
+        "-s",
+        "read-only",
+        "-o",
+    ]
     assert seen["argv"][-3:] == ["-m", "openai.gpt-5.5", "-"]  # model + stdin sentinel
     assert seen["prompt"] == "judge this"

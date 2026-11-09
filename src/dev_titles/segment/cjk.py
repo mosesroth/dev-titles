@@ -269,6 +269,7 @@ def _ja_bunsetsu_positions(text: str, words) -> set[int] | None:
     pos = {0, len(text)}
     idx = 0
     prev_binds_fwd = False  # previous token binds to what follows (no break after it)
+    prev_noun_len = 0
     for w in words:
         s = w.surface
         if not s:
@@ -287,9 +288,20 @@ def _ja_bunsetsu_positions(text: str, words) -> set[int] | None:
         # noun forming a compound like 親|画面 → keep 親画面 whole).
         clitic = any(pos1.startswith(p) for p in _JA_CLITIC_POS)
         dep_verb = pos1.startswith("動詞") and pos2.startswith("非自立")
-        if j > 0 and not (clitic or dep_verb or prev_binds_fwd):
+        # a single-kanji noun right after a multi-character noun ends a compound: 転換|点, 違和|感,
+        # 掃除|機, 記念|日 (a ja track shipped 'ローカルモデルへの転換 / 点につながるんです').
+        # Not after a one-character noun (その後 / 他の, 時 / 一度) and not a numeral: those are breaks.
+        compound_tail = (
+            is_noun
+            and len(s) == 1
+            and "一" <= s <= "鿿"
+            and not pos2.startswith("数詞")
+            and prev_noun_len >= 2
+        )
+        if j > 0 and not (clitic or dep_verb or prev_binds_fwd or compound_tail):
             pos.add(j)  # break allowed before an independent content word only
         prev_binds_fwd = pos1.startswith("接頭") or (is_noun and len(s) == 1)
+        prev_noun_len = len(s) if is_noun else 0
         idx = j + len(s)
     return pos
 

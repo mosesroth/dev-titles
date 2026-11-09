@@ -337,7 +337,14 @@ def autosub_consult(corrected, second_transcript, autosub, flagged_phrases, *, l
         low = ctext.lower()
         if not any(f and (f in low or " ".join(f.split()[:4]) in low) for f in flags):
             continue
-        a_raw = _cue_window_text(autosub, c.start, c.end).split()
+        # caption artifacts are not speech: '>>' speaker turns, '[music]', '&nbsp;'
+        a_raw = [
+            t
+            for t in re.sub(
+                r"\[[^\]]*\]|&nbsp;", " ", _cue_window_text(autosub, c.start, c.end)
+            ).split()
+            if _normkey(t)
+        ]
         if not a_raw:
             continue
         b_set = {
@@ -355,9 +362,28 @@ def autosub_consult(corrected, second_transcript, autosub, flagged_phrases, *, l
         ).get_opcodes():
             if tag in ("replace", "insert"):
                 repl, repl_norm = a_raw[j1:j2], a_norm[j1:j2]
+                was_norm = p_norm[i1:i2]
+                # The caption window is whole caption snippets, which run past the cue: an insert at
+                # the cue's START or END is the neighbouring cue's words spilling in ('gets just gets
+                # done. So I think…', '… organization. and you need to'). A change must also carry a
+                # content word (not 'a'/'the'/'like' — those match anywhere in the 2nd ASR window:
+                # 'an accelerant' -> 'a accelerant') and must not create a stutter ('that that').
+                # All 15 consult edits on 2026-11-05 were one of these; none fixed a mishear.
+                edge = tag == "insert" and (i1 == 0 or i1 == len(p_norm))
+                content = [t for t in repl if _is_content(t) and _normkey(t) not in was_norm]
+                ctx = p_norm[max(i1 - 1, 0) : i1] + p_norm[i2 : i2 + 1]
+                stutter = any(
+                    a == b for a, b in zip([*ctx[:1], *repl_norm], [*repl_norm, *ctx[1:]]) if a
+                )
                 # gate: EVERY auto-caption replacement token must also be in the 2nd-ASR
                 # window (two-source agreement) before it may overwrite the primary.
-                if repl and all(n in b_set for n in repl_norm if n):
+                if (
+                    repl
+                    and not edge
+                    and content
+                    and not stutter
+                    and all(n in b_set for n in repl_norm if n)
+                ):
                     out.extend(repl)
                     changed = True
                     continue

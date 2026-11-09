@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 
+from . import degraded as _degraded
 from .qa import (
     dqf_gate,
     is_short_of_expected,
@@ -33,10 +34,156 @@ _JUDGE_LINE = re.compile(
 )
 
 
+# The video's verified meaning notes ({sentence index: [{phrase, meaning}]}, operator answers
+# included), set once per run by localize. The judges never saw them, so a line that followed the
+# operator's answer was scored as an error ('scratch the surface' -> まずは調べて).
+_MEANINGS: dict = {}
+
+
+def set_meaning_notes(notes) -> None:
+    global _MEANINGS
+    _MEANINGS = dict(notes or {})
+
+
+def _intended(i) -> str:
+    items = _MEANINGS.get(i) or _MEANINGS.get(str(i)) or []
+    return "; ".join(f'"{n["phrase"]}" = {n["meaning"]}' for n in items)
+
+
+_NOTED = """These {lang} subtitle lines all translate the speaker's own term "{phrase}" (it means: {meaning}).
+{rows}
+Do they render the term the same way? If not, pick the ONE rendering — copied exactly from one of the
+lines above — that best carries the meaning, and list the lines that use a different one.
+Answer ONLY JSON: {{"consistent": true|false, "rendering": "<exact rendering from the lines>", "fix": [<line ids>]}}"""
+
+
+def noted_term_inconsistencies(records, invoke, lang_name, notes=None) -> list[dict]:
+    """A coined term (a phrase with a verified meaning note, its "mis-said" variants included) that
+    recurs in the video but is rendered two ways: one video's coined "local model cliff" was
+    転換点 in two ja lines and 「崖」 in three (临界点 / 断崖 in zh), so the host's "the cliff you're
+    talking about" referred to a word the viewer never saw. Returns term-inconsistency suspects
+    (fix_idx = the lines to repair toward one EXISTING rendering), which QE-repair handles like a
+    glossary inconsistency."""
+    import json as _json
+    import re as _re
+
+    notes = _MEANINGS if notes is None else notes
+    groups: dict = {}  # canonical phrase -> {"meaning", "forms"}
+    for items in notes.values():
+        for n in items or []:
+            ph = " ".join(str(n.get("phrase", "")).lower().split())
+            m = _re.search(
+                r"mis-?s(?:aid|poke)[^'\"“‘]*['\"“‘]([^'\"”’]{2,60})['\"”’]",
+                str(n.get("meaning", "")),
+                _re.I,
+            )
+            canon = " ".join(m.group(1).lower().split()) if m else ph
+            # a coined TERM, not a sentence the note glosses (a whole glossed sentence such as
+            # 'starting to mainline the idea that all platforms are platforms' came back
+            # "rendered two ways" — as whole lines)
+            if len(canon) < 4 or len(canon.split()) > 4:
+                continue
+            g = groups.setdefault(canon, {"meaning": "", "forms": {canon}})
+            if len(ph) >= 4:
+                g["forms"].add(ph)
+            if not m:
+                g["meaning"] = g["meaning"] or str(n.get("meaning", ""))
+    out = []
+    for canon, g in groups.items():
+        pats = [re.compile(rf"(?<![\w'-]){re.escape(f)}(?![\w'-])") for f in g["forms"]]
+        hits = [r for r in records if any(p.search(" ".join(r.src.lower().split())) for p in pats)]
+        if len(hits) < 2:
+            continue
+        locked = [r for r in hits if getattr(r, "locked", False)]
+        rows = "\n".join(
+            f"[{r.i}]{' [locked: a person chose this rendering]' if getattr(r, 'locked', False) else ''} "
+            f"EN: {r.src}\n    {lang_name}: {r.txt}"
+            for r in hits
+        )
+        try:
+            raw = (
+                invoke(
+                    _NOTED.format(
+                        lang=lang_name,
+                        phrase=canon,
+                        meaning=g["meaning"] or "(see the lines)",
+                        rows=rows,
+                    )
+                )
+                or ""
+            )
+            mm = _re.search(r"\{.*\}", raw, _re.S)
+            d = _json.loads(mm.group(0)) if mm else {}
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        rendering = str(d.get("rendering", "")).strip()
+        ids = {r.i for r in hits}
+        fix_val = d.get("fix") if isinstance(d, dict) else None
+        fix = [i for i in (fix_val if isinstance(fix_val, list) else []) if i in ids]
+        # the rendering must be one the track already uses (no invented term), and not in the lines to fix
+        if d.get("consistent") is not False or not rendering or not fix:
+            continue
+        # a person's decision (a locked line) sets the rendering, and is never itself 'fixed'
+        if locked and not any(rendering in r.txt for r in locked):
+            continue
+        fix = [i for i in fix if not any(r.i == i for r in locked)]
+        if not fix or not any(rendering in r.txt for r in hits if r.i not in fix):
+            continue
+        out.append(
+            {
+                "i": None,
+                "kind": "term-inconsistency",
+                "source": canon,
+                "target": rendering,
+                "detail": f"the speaker's term {canon!r} is rendered two ways; {len(fix)} line(s) don't use {rendering!r}",
+                "fix_idx": fix,
+            }
+        )
+    return out
+
+
+def note_covers(phrase: str) -> bool:
+    """A verified meaning note anywhere in the video is about `phrase` (either contains the other).
+    The note settles the phrase's sense, so a video-wide term pin for it can only fight it: the
+    judges, before they saw the notes, wanted 'lexical analysis' as the compiler term 字句解析; the
+    pin forced it into both copies of a line the operator had glossed 'reading code as text, not
+    the compiler term'."""
+    import re
+
+    def words(x):
+        return " ".join(re.findall(r"[\w'-]+", (x or "").lower()))
+
+    def inside(a, b):  # whole words of a inside b
+        return re.search(rf"(?<![\w'-]){re.escape(a)}(?![\w'-])", b) is not None
+
+    p = words(phrase)
+    if len(p) < 3:
+        return False
+    for items in _MEANINGS.values():
+        for n in items or []:
+            q = words(str(n.get("phrase", "")))
+            if len(q) < 3:
+                continue
+            # one inside the other ('lexical analysis' / 'our lexical analysis') as whole words,
+            # covering most of it: not one word of a longer phrase ('agent' in "an agent doesn't
+            # get tired of you", a 'code' note vs a 'source code review' pin; 'ai' in 'chain')
+            short, long_ = sorted((p, q), key=len)
+            if inside(short, long_) and len(short) >= 0.6 * len(long_):
+                return True
+    return False
+
+
 def _judge_batch(invoke, pairs, lang_name):
     """One batched MQM call over numbered (i, src, tgt) pairs. Returns
     {i: [(severity, desc), ...]} — segments with no error simply don't appear."""
-    body = "\n".join(f"[{n}] SOURCE: {src}\n    TARGET: {tgt}" for n, src, tgt in pairs)
+    body = "\n".join(
+        f"[{n}] SOURCE: {src}\n"
+        + (f"    INTENDED MEANING (verified): {_intended(n)}\n" if _intended(n) else "")
+        + f"    TARGET: {tgt}"
+        for n, src, tgt in pairs
+    )
     prompt = (
         f"You are an expert {lang_name} subtitle-translation evaluator using MQM. For "
         f"EACH numbered segment, list translation errors, one per line, as "
@@ -44,7 +191,10 @@ def _judge_batch(invoke, pairs, lang_name):
         f"minor (adequacy = dropped/added/mistranslated meaning, a wrong term or number; "
         f"fluency = grammar/register/naturalness). If a segment has no error output "
         f"'<n> no-error'. Judge the TRANSLATION against its SOURCE only. Do NOT penalize "
-        f"a subtitler's legitimate condensation of filler/greetings/pronouns.\n\n"
+        f"a subtitler's legitimate condensation of filler/greetings/pronouns. Where an "
+        f"INTENDED MEANING is given, it was verified (by the video's operator or two models): "
+        f"a target that conveys it is correct — don't flag it for missing another reading of "
+        f"the source's words.\n\n"
         f"{body}\n\nErrors:"
     )
     resp = invoke(prompt) or ""
@@ -130,7 +280,7 @@ def translation_suspects(
     """Reference-free QE over per-sentence `records` (each with .i/.src/.txt).
 
     `invoke` is the primary MQM judge (Claude). `second_judge` (optional) is a
-    DIFFERENT-FAMILY judge callable (e.g. CodexCliJudge().invoke, GPT-5.x) — the
+    DIFFERENT-FAMILY judge callable (llm.second_judge(), e.g. a GPT model) — the
     two-judge panel: our default judge is Claude grading Claude output, which
     self-preference bias inflates, so a non-Claude judge de-biases it. Per-segment
     aggregation (see `_agg`): major/critical = MAX across judges (UNION — never miss a
@@ -395,6 +545,7 @@ def qe_repair(
             )
         targets -= held
     order = sorted(targets, key=lambda i: -_seg_penalty(per_seg.get(i, {})))[:max_repairs]
+    before = {r.i: r.txt for r in records}
     repaired = []
     for i in order:
         rec = by_i.get(i)
@@ -465,7 +616,7 @@ def qe_repair(
                     news.append(nn)
                 old_p, new_p = sum(olds) / len(olds), sum(news) / len(news)
         except Exception as e:
-            log(f"{lang}: QE-repair #{i} skipped ({type(e).__name__}) — keeping original")
+            log(f"{_degraded.note(f'{lang}: QE-repair #{i}', e)} — keeping original")
             continue
         if new_p < old_p:
             log(f"{lang}: QE-repair #{i} ACCEPT ({old_p:.1f}->{new_p:.1f}): {critique[:70]}")
@@ -474,7 +625,30 @@ def qe_repair(
             repaired.append(i)
         else:
             log(f"{lang}: QE-repair #{i} reject ({old_p:.1f}->{new_p:.1f}, no gain)")
-    return repaired
+    return repaired + _propagate_to_repeats(records, repaired, before, lang, log, protected)
+
+
+def _propagate_to_repeats(records, repaired, before, lang, log, protected=None) -> list:
+    """A repaired sentence's repeats (same English, same old translation — a cold-open teaser of a
+    later line) get the same repair; the judges flagged one copy, so only one was fixed and the two
+    drifted apart (a teaser at 0:09 vs the same line at 7:07). Returns the indices changed here."""
+
+    def key(t):
+        return " ".join((t or "").lower().split())
+
+    by_i = {r.i: r for r in records}
+    done = set(repaired) | set(protected or ())  # a native-editor rewrite is never overwritten
+    out = []
+    for i in repaired:
+        src = by_i[i]
+        for r in records:
+            if r.i in done or key(r.src) != key(src.src) or r.txt != before.get(i):
+                continue
+            r.txt, r.residual_miss = src.txt, ""
+            done.add(r.i)
+            out.append(r.i)
+            log(f"{lang}: QE-repair #{i} also applied to its repeat #{r.i} (same English)")
+    return out
 
 
 # Han runs OR katakana runs (>=2). Hiragana particles (の/を/し/は…) act as separators, so a
@@ -731,6 +905,11 @@ def harvest_term_pins(
         ):
             log(f"{lang}: term-pin REJECTED (common English phrase kept Latin) {fix['source']!r}")
             continue
+        # MEANING-NOTE GUARD: the operator (or both model families) settled what this phrase means
+        # here; a mechanical video-wide substitution can't know better.
+        if note_covers(fix["source"]):
+            log(f"{lang}: term-pin REJECTED (a meaning note settles this phrase) {fix['source']!r}")
+            continue
         if len(pins) >= max_pins and (fix["source"].lower(), fix["correct"]) not in pins:
             continue
         key = (fix["source"].lower(), fix["correct"])
@@ -754,6 +933,14 @@ def harvest_term_pins(
     out, resolved = [], []
     for p in pins.values():
         is_override = not _re.search(r"[A-Za-z]", p["wrong"])  # CJK->CJK flip
+        # restoring a keep-Latin name/identifier (达里奥 -> Dario) is never a sense change: no second
+        # judge needed (such pins were being held as an 'uncorroborated override')
+        if (
+            is_override
+            and _nrm(p["correct"]) == _nrm(p["source"])
+            and p["source"].strip().lower() in kl
+        ):
+            is_override = False
         if is_override and not p["_corrob"]:
             # Uncorroborated single-judge CJK->CJK flip. Instead of always deferring to a human,
             # ADJUDICATE it: a focused verification (ideally a different-family model) that checks

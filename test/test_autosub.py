@@ -114,3 +114,56 @@ def test_recover_repeated_runs_noop_on_clean_transcript():
     )
     _, n = recover_repeated_runs(tr, Subtitle("en", [Cue(0, 5, ["x"])]))
     assert n == 0
+
+
+def _second(text, t0=0.0):
+    return Transcript("en", _words([(w, t0 + 0.3 * k) for k, w in enumerate(text.split())]))
+
+
+def test_no_spill_from_neighbouring_captions_at_cue_edges():
+    """The caption snippets overlapping a cue run past it."""
+    corrected = Subtitle(
+        "en", [Cue(5.0, 9.0, ["So I think getting stuff done into NBA for customers."])]
+    ).renumber()
+    autosub = Subtitle(
+        "en",
+        [
+            Cue(3.0, 5.5, ["gets just gets done. So I think getting stuff done"]),
+            Cue(5.5, 9.5, ["into NBA for customers. and you need to"]),
+        ],
+    )
+    second = _second(
+        "gets just gets done. So I think getting stuff done into NBA for customers. and you need to",
+        3.0,
+    )
+    assert autosub_consult(corrected, second, autosub, ["into NBA"]) == []
+
+
+def test_no_function_word_swaps_stutters_or_caption_markers():
+    cases = [
+        (
+            "In fact, it's an accelerant for us",
+            "In fact, it's a accelerant for us",
+            "an accelerant",
+        ),
+        (
+            "And the agent can take that burden away",
+            "And the agent can take that that burden away",
+            "take that burden",
+        ),
+        (
+            "Gazelle, thanks for joining. Thank you",
+            "Gazelle, thanks for joining. >> Thank you",
+            "Thank you",
+        ),
+        (
+            "you're blindfolded next to a race car",
+            "you're like blindfolded next to like a race car",
+            "blindfolded",
+        ),
+    ]
+    for prim, cap, flag in cases:
+        corrected = Subtitle("en", [Cue(0.0, 4.0, [prim])]).renumber()
+        autosub = Subtitle("en", [Cue(0.0, 4.0, [cap])])
+        assert autosub_consult(corrected, _second(cap), autosub, [flag]) == [], prim
+        assert corrected.cues[0].lines == [prim]

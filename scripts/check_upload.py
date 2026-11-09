@@ -38,6 +38,7 @@ from dev_titles.validate.content_sync import content_speech_desync  # noqa: E402
 from dev_titles.validate.speech_sync import (  # noqa: E402
     speech_sync_report,
     speech_words_for,
+    speech_words_for_run,
     video_id_for,
 )
 from dev_titles.validate.sync import local_desync, sync_report  # noqa: E402
@@ -96,7 +97,12 @@ def main(argv=None) -> int:
         speech: list = []
         if not a.no_speech:
             vid = ids.get(video) or video_id_for(video, OUTPUT / "ticket")
-            speech = speech_words_for(vid, OUTPUT / "_speech") if vid else []
+            run = OUTPUT / "ticket" / video
+            speech = (
+                speech_words_for_run(run, vid or "", OUTPUT / "_speech")
+                if run.is_dir()
+                else speech_words_for(vid, OUTPUT / "_speech") if vid else []
+            )
             if not speech:
                 warnings.append(f"{p.name}: no speech timings available — EN sync not checked")
             else:

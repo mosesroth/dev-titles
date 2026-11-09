@@ -120,7 +120,10 @@ class CodexCliJudge:
             ensure_clean_codex_home(self.codex_home)
 
     def _argv(self, out_path: str) -> list[str]:
-        argv = [self.binary, "exec", "--skip-git-repo-check", "-o", out_path]
+        # read-only sandbox: the judge only reads a prompt and writes its answer to `out_path` (the
+        # CLI writes that, not the model); judged text is untrusted, so no model-run command may
+        # change anything. Explicit, not left to whatever the copied config defaults to.
+        argv = [self.binary, "exec", "--skip-git-repo-check", "-s", "read-only", "-o", out_path]
         if self.model:
             argv += ["-m", self.model]
         argv.append("-")  # read the prompt from stdin

@@ -97,9 +97,12 @@ class CliTranslator(Translator):
         self.mode = isolation_mode(env)
 
     def _argv(self) -> list[str]:
+        # --tools "": no tools at all. Every call is text in, text out, and prompts carry untrusted
+        # text (video descriptions, captions, fetched docs): a planted instruction must not be able
+        # to run a command or fetch a URL. (Web lookups are Python's http_fetch, not the model's.)
         argv = [self.binary, "-p", "--output-format", "text"]
         if self.mode == "bare":
-            argv.append("--bare")
+            argv += ["--bare", "--tools", ""]
         elif self.mode == "safe":
             argv += ["--safe-mode", "--no-session-persistence", "--tools", ""]
         if self.model_id:

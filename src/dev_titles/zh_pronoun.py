@@ -25,6 +25,8 @@ import json
 import re
 from pathlib import Path
 
+from . import degraded as _degraded
+
 _YOU = re.compile(r"\byou(?:r|rs|rself|'re|'ve|'d|'ll)?\b", re.I)
 _SINGULAR = re.compile(r"您|你(?!们)")
 # "you all" / "you guys" / "both of you": rendered 大家, which is right for the VIEWERS but wrong when
@@ -136,7 +138,7 @@ def pronoun_pass(
         try:
             out = _parse(invoke(PROMPT.format(kind=kind, items=items)))
         except Exception as e:  # never sink a run on it
-            logger(f"zh-Hans: pronoun check skipped ({type(e).__name__})")
+            logger(f"{_degraded.note('zh-Hans: pronoun check', e)}")
             return applied
         by_id = {r.i: r for r in chunk}
         for x in out:

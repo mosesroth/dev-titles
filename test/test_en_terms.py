@@ -25,3 +25,15 @@ def test_code_and_correct_names_are_left_alone():
 
 def test_lowercase_hyphenated_package_names_are_code():
     assert normalize("on npm it was react-native-video", ["React Native Video"], {})[1] == []
+
+
+def test_a_longer_approved_spelling_rewraps_an_overflowing_line():
+    from dev_titles.en_terms import apply
+    from dev_titles.model import Cue, Subtitle
+
+    en = Subtitle(
+        "en", [Cue(0.0, 3.0, ["us a little bit about Vatoo, the products,", "and the team"])]
+    )
+    out, log = apply(en, ["Vantoo"], {"Vatoo": "Vantoo"})
+    assert log and all(len(x) <= 42 for x in out.cues[0].lines)
+    assert " ".join(out.cues[0].lines) == "us a little bit about Vantoo, the products, and the team"

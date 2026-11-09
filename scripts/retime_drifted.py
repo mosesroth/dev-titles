@@ -17,6 +17,7 @@ Only change on top of the text: a ，/、 that lands at a line end becomes the l
 import json
 import re
 import sys
+from pathlib import Path
 
 from dev_titles import llm
 from dev_titles.cli import _read_any
@@ -30,7 +31,7 @@ from dev_titles.validate.rules import validity_report
 inv = llm.invoke()
 zh_path, en_path, out_base = sys.argv[1:4]
 spec = spec_for("zh-Hans")
-g = load("glossary/glossary.yaml")
+g = load(str(Path(__file__).resolve().parents[1] / "glossary" / "glossary.yaml"))
 keep = [t.translations.get("zh-Hans") for t in g.terms if t.translations.get("zh-Hans")] + list(
     g.identifiers
 )

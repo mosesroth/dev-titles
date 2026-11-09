@@ -129,3 +129,13 @@ def test_stray_ascii_period_flagged_in_cjk():
     )
     assert flag(".良い質問ですね") and flag("使えます.")
     assert not flag("Next.jsを使います") and not flag("v1.2です") and not flag("待って...")
+
+
+def test_model_reply_to_a_planted_instruction_is_commentary_not_a_subtitle():
+    from dev_titles.localize import model_line
+
+    assert (
+        model_line("I don't have a shell or web tool here, so I couldn't run it. ありがとう", "FB")
+        == "FB"
+    )
+    assert model_line("I can't run the app on my phone yet.", "FB") != "FB"  # ordinary speech

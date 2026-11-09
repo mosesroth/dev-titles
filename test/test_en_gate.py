@@ -94,3 +94,29 @@ def test_sign_off_survives_a_timing_only_change(tmp_path):
     edited = copy.deepcopy(en)
     edited.cues[1].lines = ["Welcome back, everyone."]
     assert not en_gate.check(edited, tmp_path)[0]
+
+
+def test_youtube_en_without_caption_crosscheck_is_held(tmp_path):
+    """A run once signed itself off although the auto-captions never arrived."""
+    en_gate.save_review_state(tmp_path, "ok", [])
+    en_gate.save_crosscheck(tmp_path, youtube=True, auto_captions=False, second_asr=True)
+    ok, why, _ = en_gate.check(_en(), tmp_path)
+    assert not ok and "auto-captions" in why and not (tmp_path / en_gate.APPROVAL).exists()
+    en_gate.approve(tmp_path, _en(), by="operator")  # a person listened: that sign-off stands
+    assert en_gate.check(_en(), tmp_path)[0]
+
+
+def test_local_media_or_captioned_youtube_still_signs_off(tmp_path):
+    for yt, caps in ((False, False), (True, True)):
+        d = tmp_path / f"{yt}{caps}"
+        d.mkdir()
+        en_gate.save_review_state(d, "ok", [])
+        en_gate.save_crosscheck(d, youtube=yt, auto_captions=caps, second_asr=True)
+        assert en_gate.check(_en(), d)[0]
+
+
+def test_signed_off_survives_retiming_but_not_a_text_change(tmp_path):
+    en = _en()
+    en_gate.approve(tmp_path, en, by="operator")
+    assert en_gate.signed_off(en, tmp_path)
+    assert not en_gate.signed_off(_en("A different line."), tmp_path)

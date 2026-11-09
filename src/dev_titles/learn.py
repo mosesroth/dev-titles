@@ -22,6 +22,7 @@ evidence before adopting it — as a job:
 from __future__ import annotations
 
 import copy
+import difflib
 import json
 import random
 import re
@@ -220,21 +221,234 @@ def term_evidence_elsewhere(term: str, lang: str, caches, skip: str, k: int = 3)
     return out
 
 
-def reviewer_counterevidence(x, finals_dir, skip: str) -> list[str]:
+def reviewer_files(reviewed_dir, lang: str) -> dict[str, str]:
+    """{video: text} of the reviewers' own finals (<reviewed>/<batch>/<video>.<lang>_Reviewed*.srt,
+    every batch; a later review of a video replaces an earlier one)."""
+    out = {}
+    for p in sorted(Path(reviewed_dir).rglob("*.srt")):
+        if f".{lang}" in p.name or f"_{lang}" in p.name:
+            out[re.split(r"[._]", p.name)[0]] = p.read_text(encoding="utf-8")
+    return out
+
+
+def reviewer_counterevidence(x, reviewed_dir, skip: str) -> list[str]:
     """For a glossary lesson: where the REVIEWERS' own finals of OTHER videos keep the form the lesson
     would avoid — evidence the reviewer's choice was contextual, not a rule (a reviewer's 'side
-    project' -> 個人プロジェクト in one video, while the same reviewer kept サイドプロジェクト 9x elsewhere)."""
+    project' -> 個人プロジェクト in one video, while the same reviewer kept サイドプロジェクト 9x elsewhere).
+    Reads the reviewer corpus only: the deliverables root also holds our own unreviewed tracks,
+    which are no evidence of what a reviewer keeps."""
     hits = []
     avoid = [a for a in (x.get("avoid") or []) if a and len(a) >= 2]
-    for p in sorted(Path(finals_dir).glob(f"*.{x['lang']}.srt")):
-        if p.name.split(".")[0] == skip:
+    for video, text in reviewer_files(reviewed_dir, x["lang"]).items():
+        if video == skip:
             continue
-        text = p.read_text(encoding="utf-8")
         for a in avoid:
             n = text.count(a)
             if n:
-                hits.append(f"{p.name.split('.')[0]}: {a!r} x{n}")
+                hits.append(f"{video}: {a!r} x{n}")
     return hits
+
+
+# ---- consistent reviewer conventions across videos (judges can't know house terminology) ----
+
+PUNCT = re.compile(r"^[\s，、。．・　|？?！!：:；;“”\"'（）()…—\-「」『』]*$")
+_CJK = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+
+
+def tokens(s: str, lang: str) -> list[str]:
+    s = re.sub(r"\s+", "", s or "")
+    if lang.startswith("zh"):
+        import jieba
+
+        return [t for t in jieba.lcut(s) if t]
+    # ja: script runs (kanji / katakana / hiragana / Latin) — coarse, but a term is one run
+    return re.findall(
+        r"[A-Za-z0-9.+#\-]+|[\u4e00-\u9fff々]+|[\u30a0-\u30ff]+|[\u3040-\u309f]+|.", s
+    )
+
+
+def replacements(draft: str, human: str, lang: str):
+    """Short word replacements draft -> final (1-3 tokens a side, <= 8 chars, the final side CJK);
+    the draft side may be Latin (Web -> 网页)."""
+    a, b = tokens(draft, lang), tokens(human, lang)
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if op != "replace" or not (1 <= i2 - i1 <= 3 and 1 <= j2 - j1 <= 3):
+            continue
+        x, y = "".join(a[i1:i2]), "".join(b[j1:j2])
+        # the tokenizer may cut the two sides differently (Web|开发 vs 网页开发): trim what they share
+        while x and y and x[-1] == y[-1]:
+            x, y = x[:-1], y[:-1]
+        while x and y and x[0] == y[0]:
+            x, y = x[1:], y[1:]
+        if not x or not y or PUNCT.match(x) or PUNCT.match(y) or len(x) > 8 or len(y) > 8 or x == y:
+            continue
+        if _CJK.search(y) and (_CJK.search(x) or re.fullmatch(r"[A-Za-z][A-Za-z0-9.+#\-]*", x)):
+            yield x, y
+
+
+def punct_edits(draft: str, human: str):
+    """Punctuation / spacing edits draft -> final, with the character before them for context:
+    ('吗', '', '？') = a ？ added after 吗. Line breaks are ignored."""
+    a, b = (draft or "").replace("\n", ""), (human or "").replace("\n", "")
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        x, y = a[i1:i2], b[j1:j2]
+        if op != "equal" and PUNCT.match(x) and PUNCT.match(y) and (x.strip() or y.strip()):
+            yield (a[i1 - 1] if i1 else "^"), x, y
+
+
+def conventions(rows, lang: str, reviewed_dir, min_videos: int = 2, min_rate: float = 0.7):
+    """Consistent reviewer changes over `rows` ({video, en, ours, human}, any number of videos):
+    (word_changes, punct_changes). A word change counts when made in >= min_videos videos and the
+    reviewers changed the draft word in >= min_rate of the lines that had it (kept elsewhere = a
+    contextual choice). Each carries its counter-evidence: the draft word in reviewer finals of
+    videos where it was never changed."""
+    from collections import defaultdict
+
+    ch: dict = defaultdict(lambda: {"videos": set(), "n": 0, "ex": []})
+    pu: dict = defaultdict(lambda: {"videos": set(), "n": 0, "ex": []})
+    for r in rows:
+        if not r.get("ours") or not r.get("human"):
+            continue
+        if _n(r["ours"]) != _n(r["human"]):
+            for x, y in set(replacements(r["ours"], r["human"], lang)):
+                c = ch[(x, y)]
+                c["videos"].add(r["video"])
+                c["n"] += 1
+                if len(c["ex"]) < 4:
+                    c["ex"].append({k: r[k] for k in ("video", "en", "ours", "human")})
+        for before, x, y in set(punct_edits(r["ours"], r["human"])):
+            key = (("Q" if before in "吗呢吧么" else "") + ("^" if before == "^" else ""), x, y)
+            c = pu[key]
+            c["videos"].add(r["video"])
+            c["n"] += 1
+            if len(c["ex"]) < 3:
+                c["ex"].append({k: r[k] for k in ("video", "en", "ours", "human")})
+    finals = reviewer_files(reviewed_dir, lang)
+    words = []
+    for (x, y), c in ch.items():
+        if len(c["videos"]) < min_videos:
+            continue
+        has = [r for r in rows if r.get("ours") and x in _n(r["ours"]) and r.get("human")]
+        kept = sum(x in _n(r["human"]) for r in has)
+        changed = sum(x not in _n(r["human"]) and y in _n(r["human"]) for r in has)
+        rate = changed / max(changed + kept, 1)
+        if rate < min_rate:
+            continue
+        elsewhere = {v: t.count(x) for v, t in finals.items() if v not in c["videos"] and x in t}
+        words.append(
+            {
+                "from": x,
+                "to": y,
+                "videos": sorted(c["videos"]),
+                "changes": c["n"],
+                "kept": kept,
+                "rate": round(rate, 2),
+                "reviewers_keep_elsewhere": elsewhere,
+                "examples": c["ex"],
+            }
+        )
+    punct = [
+        {
+            "after": k[0],
+            "from": k[1],
+            "to": k[2],
+            "videos": sorted(c["videos"]),
+            "n": c["n"],
+            "examples": c["ex"],
+        }
+        for k, c in pu.items()
+        if len(c["videos"]) >= min_videos and c["n"] >= 3
+    ]
+    words.sort(key=lambda c: (-len(c["videos"]), -c["changes"]))
+    punct.sort(key=lambda c: -c["n"])
+    return words, punct
+
+
+CLASSIFY = """Native {L} subtitle reviewers of a developer YouTube channel changed our machine subtitles. Below
+are word changes they made CONSISTENTLY across several videos, each with example lines (English, our
+draft, their final). For each change decide:
+- "term": the English word or phrase both words render (exactly as it appears in the English lines);
+- "kind": "terminology" if the reviewers' word is the house rendering of that English term in general
+  (apply it everywhere), "context" if it depends on the sentence, "grammar" if it is a grammatical or
+  stylistic adjustment rather than a term (particles, measure words, verb forms);
+- "why": max 15 words.
+CHANGES:
+{items}
+Return ONLY a JSON array: [{{"id": <id>, "term": "...", "kind": "terminology|context|grammar", "why": "..."}}]"""
+
+
+def convention_lessons(words, invoke, lang: str, max_elsewhere: int = 1) -> tuple[list, list]:
+    """Word conventions -> (glossary_term lessons, the rest with the reason). A lesson needs
+    kind == terminology, an English term found in its example lines, >= 3 changes, and reviewers
+    keeping the draft word in at most `max_elsewhere` lines of other videos. Validated by the corpus,
+    not by judges: judges endorse only ~1 in 4 reviewer edits and cannot know house terms
+    (memory: judge calibration) — the same reason a fixed line must be established in the corpus."""
+    if not words:
+        return [], []
+    L = LANG_NAME.get(lang, lang)
+    items = "\n".join(
+        json.dumps(
+            {
+                "id": k,
+                "from": c["from"],
+                "to": c["to"],
+                "examples": [
+                    {k2: e[k2] for k2 in ("en", "ours", "human")} for e in c["examples"][:3]
+                ],
+            },
+            ensure_ascii=False,
+        )
+        for k, c in enumerate(words)
+    )
+    got = _json(invoke(CLASSIFY.format(L=L, items=items)) or "")
+    for x in got if isinstance(got, list) else []:
+        if isinstance(x, dict) and isinstance(x.get("id"), int) and 0 <= x["id"] < len(words):
+            words[x["id"]].update({k: x.get(k) for k in ("term", "kind", "why")})
+    lessons, rest = [], []
+    for c in words:
+        term = (c.get("term") or "").strip()
+        in_en = term and all(re.search(re.escape(term), e["en"], re.I) for e in c["examples"])
+        n_else = sum(c["reviewers_keep_elsewhere"].values())
+        why = (
+            None
+            if c.get("kind") == "terminology"
+            and in_en
+            and c["changes"] >= 3
+            and n_else <= max_elsewhere
+            else f"kind={c.get('kind')}, term in English={bool(in_en)}, changes={c['changes']}, "
+            f"reviewers keep it elsewhere={n_else}"
+        )
+        if why:
+            rest.append({**c, "not_a_lesson": why})
+            continue
+        lessons.append(
+            {
+                "kind": "glossary_term",
+                "lang": lang,
+                "source": term,
+                "target": c["to"],
+                "avoid": [c["from"]],
+                "notes": f"reviewers changed {c['from']} -> {c['to']} {c['changes']}x in "
+                f"{len(c['videos'])} videos ({', '.join(c['videos'][:4])}); {c.get('why') or ''}",
+                "evidence": [
+                    {
+                        "i": -1,
+                        "en": e["en"],
+                        "ours": e["ours"],
+                        "human": e["human"],
+                        "video": e["video"],
+                    }
+                    for e in c["examples"]
+                ],
+                "validation": {
+                    "score": {
+                        "corpus": f"{c['changes']} changes, rate {c['rate']}, "
+                        f"kept elsewhere {n_else}"
+                    }
+                },
+            }
+        )
+    return lessons, rest
 
 
 def corpus_support(source: str, lang: str, pairs) -> dict:

@@ -54,9 +54,38 @@ PHRASE: {phrase}
 Answer ONLY JSON: {{"meaning": "<what the speaker means here, max 15 words>"}}"""
 
 SAME = """Two readings of the phrase "{phrase}" in: "{sent}"
+Before: {prev}
+After: {nxt}
 A: {a}
 B: {b}
-Do A and B say the same thing about what the speaker means (wording aside)? Answer ONLY JSON: {{"same": true | false}}"""
+How do they relate? "same": they say the same thing (wording aside). "a_adds" / "b_adds": they agree,
+but one adds detail from the context (a reason, a referent from a nearby sentence). "conflict": they
+give DIFFERENT meanings, so a translator would write a different line depending on which is right.
+If the speaker explains the phrase in the next sentence, read it that way: that is not ambiguity.
+Answer ONLY JSON: {{"relation": "same" | "a_adds" | "b_adds" | "conflict"}}"""
+
+
+def _relation(judges, phrase, sent, prev, nxt, a, b):
+    """'same' | 'a_adds' | 'b_adds' | 'conflict' | None. A conflict needs every judge that answers
+    (both model families) to call it one; one model's strictness sent agreeing readings to the
+    operator (phrases like 'universal shipping' or 'too much token burning', where the two
+    readings in fact agreed)."""
+    rels = []
+    for j in judges:
+        if j is None:
+            continue
+        try:
+            raw = j(SAME.format(phrase=phrase, sent=sent, prev=prev, nxt=nxt, a=a, b=b)) or ""
+            m = re.search(r"\{.*\}", raw, re.S)
+            r = (json.loads(m.group(0)) if m else {}).get("relation")
+        except Exception:
+            r = None
+        if r in ("same", "a_adds", "b_adds"):
+            return r
+        rels.append(r)
+    # a judge with no usable answer counts for neither side: a conflict stands unless a judge
+    # positively says the readings agree
+    return "conflict" if "conflict" in rels else None
 
 
 def _apply_operator(notes: dict, d: dict, sents) -> dict:
@@ -70,14 +99,56 @@ def _apply_operator(notes: dict, d: dict, sents) -> dict:
     return out
 
 
-def disputed(cache_path) -> list[dict]:
-    """Notes the two models disagreed on that the operator has not answered yet."""
+def disputed(cache_path, sentences=None) -> list[dict]:
+    """Notes the two models disagreed on that the operator has not answered yet. With `sentences`
+    (the current EN's), a question about a sentence the EN no longer has is moot: the line was
+    corrected since ("getting stuff done into NWA" -> "in an end-to-end way").
+    """
     p = Path(cache_path) if cache_path else None
     if not (p and p.exists()):
         return []
     d = json.loads(p.read_text(encoding="utf-8"))
     done = set(d.get("operator") or {})
-    return [x for x in d.get("disputed", []) if x.get("sentence") not in done]
+    out = [x for x in d.get("disputed", []) if x.get("sentence") not in done]
+    if sentences is not None:
+        have = {" ".join(str(s).split()) for s in sentences}
+        out = [x for x in out if " ".join(str(x.get("sentence", "")).split()) in have]
+    return out
+
+
+def recheck_disputes(cache_path, verify, sents=None, first=None) -> list[str]:
+    """Re-judge stored disputes with the current comparison (SAME): readings that agree — one
+    adding context — become a kept note with the plainer reading; only conflicts stay questions.
+    For disputes recorded under the old same/different comparison. Returns the settled sentences."""
+    p = Path(cache_path)
+    if not p.exists():
+        return []
+    d = json.loads(p.read_text(encoding="utf-8"))
+    keep, settled = [], []
+    for x in d.get("disputed", []):
+        texts = [str(getattr(t, "text", t)) for t in (sents or [])]
+        k = texts.index(x["sentence"]) if x["sentence"] in texts else None
+        rel = _relation(
+            [verify, first],
+            x["phrase"],
+            x["sentence"],
+            texts[k - 1] if k else "",
+            texts[k + 1] if k is not None and k + 1 < len(texts) else "",
+            x["a"],
+            x["b"],
+        )
+        if rel in ("same", "a_adds", "b_adds"):
+            plain = x["b"] if rel == "a_adds" else x["a"]
+            d.setdefault("notes", {}).setdefault(str(x["id"]), []).append(
+                {"phrase": x["phrase"], "meaning": plain}
+            )
+            settled.append(x["sentence"])
+        else:
+            keep.append(x)
+    if settled:
+        d["disputed"] = keep
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    return settled
 
 
 def set_operator_meaning(cache_path, sentence: str, meaning: str) -> None:
@@ -87,7 +158,7 @@ def set_operator_meaning(cache_path, sentence: str, meaning: str) -> None:
     p.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def _verify(notes, sents, verify, brief):
+def _verify(notes, sents, verify, brief, first=None):
     kept: dict[int, list[dict]] = {}
     disputes: list[dict] = []
     for k, items in sorted(notes.items()):
@@ -112,18 +183,24 @@ def _verify(notes, sents, verify, brief):
                 m = re.search(r"\{.*\}", raw, re.S)
                 other = str((json.loads(m.group(0)) if m else {}).get("meaning", "")).strip()
                 if other:
-                    raw2 = (
-                        verify(
-                            SAME.format(
-                                phrase=n["phrase"], sent=sents[k].text, a=n["meaning"], b=other
-                            )
-                        )
-                        or ""
+                    rel = _relation(
+                        [verify, first],
+                        n["phrase"],
+                        sents[k].text,
+                        sents[k - 1].text if k else "",
+                        sents[k + 1].text if k + 1 < len(sents) else "",
+                        n["meaning"],
+                        other,
                     )
-                    m2 = re.search(r"\{.*\}", raw2, re.S)
-                    same = (json.loads(m2.group(0)) if m2 else {}).get("same")
-                    if isinstance(same, bool):
-                        v = {"agree": same, "meaning": other}
+                    # only a real conflict goes to the operator: readings that agree, one with
+                    # extra context ("the biggest obstacle" vs "...to letting AI agents buy"), keep
+                    # the reading that adds nothing — the translator sees the line's neighbours
+                    # anyway, and a detailed note invites the line to say more than the speaker did
+                    # (on one video both of the questions raised were this kind)
+                    if rel in ("same", "a_adds", "b_adds", "conflict"):
+                        v = {"agree": rel != "conflict", "meaning": other}
+                        if rel == "a_adds":
+                            n = {**n, "meaning": other}
             except Exception:
                 v = {}
             if v.get("agree") is True:
@@ -170,7 +247,41 @@ def meaning_notes(
         except (json.JSONDecodeError, OSError):
             prev_d = {}
     notes: dict[int, list[dict]] = {}
+    # REUSE: a sentence whose text is unchanged keeps its verified notes and its open dispute, so a
+    # small EN edit (four name fixes in one video) doesn't re-ask every sentence and turn up
+    # new disagreements on lines nobody touched. Only changed sentences go back to the models.
+    side = hashlib.sha1(
+        (brief + ("\x02v" if verify else "")).encode("utf-8"), usedforsecurity=False
+    )
+    side_key = side.hexdigest()[:16]
+    old_texts = prev_d.get("texts") if prev_d.get("side") == side_key else None
+    reused_disputes: list[dict] = []
+    todo = set(range(len(sents)))
+    if isinstance(old_texts, list):
+        # duplicate lines ('Okay.') are matched in order: the n-th occurrence of a text now is the
+        # n-th one before, so each keeps its own note and disputes
+        where: dict = {}
+        for j, t in enumerate(old_texts):
+            where.setdefault(t, []).append(j)
+        old_notes = prev_d.get("notes", {}) or {}
+        old_disp: dict = {}
+        for d in prev_d.get("disputed", []) or []:  # a sentence can hold several disputes
+            old_disp.setdefault(d.get("id"), []).append(d)
+        seen: dict = {}
+        for k, snt in enumerate(sents):
+            n = seen.get(snt.text, 0)
+            seen[snt.text] = n + 1
+            olds = where.get(snt.text) or []
+            if n >= len(olds):
+                continue
+            j = olds[n]
+            todo.discard(k)
+            if str(j) in old_notes:
+                notes[k] = old_notes[str(j)]
+            reused_disputes += [{**d, "id": k} for d in old_disp.get(j, [])]
     for s0 in range(0, len(sents), batch):
+        if not any(s0 <= k < s0 + batch for k in todo):
+            continue
         # a little overlap on each side so a phrase is read in context
         lo, hi = max(0, s0 - 3), min(len(sents), s0 + batch + 3)
         rows = "\n".join(f"{k} | {sents[k].text}" for k in range(lo, hi))
@@ -192,19 +303,24 @@ def meaning_notes(
             except (KeyError, TypeError, ValueError):
                 continue
             ph, me = str(f.get("phrase", "")).strip(), str(f.get("meaning", "")).strip()
-            if not (s0 <= k < min(s0 + batch, len(sents)) and ph and me):
+            if not (s0 <= k < min(s0 + batch, len(sents)) and ph and me) or k not in todo:
                 continue
             if re.sub(r"\W", "", ph.lower()) not in re.sub(r"\W", "", sents[k].text.lower()):
                 continue  # the phrase must really be in that sentence
             notes.setdefault(k, []).append({"phrase": ph, "meaning": me})
-    disputes: list[dict] = []
-    if verify is not None and notes:
-        notes, disputes = _verify(notes, sents, verify, brief)
+    disputes: list[dict] = list(reused_disputes)
+    fresh = {k: v for k, v in notes.items() if k in todo}
+    if verify is not None and fresh:
+        kept, new_disputes = _verify(fresh, sents, verify, brief, first=invoke)
+        notes = {**{k: v for k, v in notes.items() if k not in todo}, **kept}
+        disputes += new_disputes
     if p:
         p.write_text(
             json.dumps(
                 {
                     "key": key,
+                    "side": side_key,
+                    "texts": [snt.text for snt in sents],
                     "notes": {str(k): v for k, v in notes.items()},
                     "disputed": disputes,
                     "operator": prev_d.get("operator") or {},  # answers survive a re-generation

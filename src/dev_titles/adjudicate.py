@@ -43,12 +43,16 @@ about one subtitle line. Decide whether each issue is REAL. If at least one is, 
 the smallest change that fixes it, keeping everything else (wording, Latin terms, numbers). If none
 is real (the reviewer misread the English), answer NO_CHANGE.
 Before: {prev}
-ENGLISH: {en}
+ENGLISH: {en}{meaning}
 After: {nxt}
 CURRENT {L}: {cur}
 ISSUES:
 {issues}
 Output ONLY the corrected {L} line, or NO_CHANGE."""
+
+MEANING = """
+INTENDED MEANING (verified by the video's operator or two models): {note}. A line that conveys it is
+correct; an issue that asks for a different reading of the English is NOT real."""
 
 
 def _json(text: str):
@@ -123,8 +127,14 @@ def candidates(lang, L, records, suspects, other=None, invoke=None) -> dict[int,
     return out
 
 
-def review_and_fix(lang, L, records, suspects, invoke, judges, other=None, logger=print, seed=7):
-    """Apply gated corrections in place. Returns [{i, before, after, issues, status}]."""
+def review_and_fix(
+    lang, L, records, suspects, invoke, judges, other=None, logger=print, seed=7, notes=None
+):
+    """Apply gated corrections in place. Returns [{i, before, after, issues, status}].
+    `notes`: the video's verified meaning notes ({sentence index: [{phrase, meaning}]}, operator
+    answers included). The fix and its judges see a line's note: without it a line that followed
+    the operator's answer ('scratch the surface' = 'start looking into it') was 'fixed' back to a
+    literal reading ('a brief look')."""
     from .learn import pairwise
 
     cands = candidates(lang, L, records, suspects, other, invoke)
@@ -135,12 +145,16 @@ def review_and_fix(lang, L, records, suspects, invoke, judges, other=None, logge
         r = by_i[i]
         prev = by_i[i - 1].src if i - 1 in by_i else ""
         nxt = by_i[i + 1].src if i + 1 in by_i else ""
+        items = (notes or {}).get(i) or (notes or {}).get(str(i)) or []
+        note = "; ".join(f'"{n["phrase"]}" = {n["meaning"]}' for n in items)
+        meaning = MEANING.format(note=note) if note else ""
         try:
             raw = invoke(
                 FIX.format(
                     L=L,
                     prev=prev,
                     en=r.src,
+                    meaning=meaning,
                     nxt=nxt,
                     cur=r.txt,
                     issues="\n".join(f"- {x}" for x in issues),
@@ -160,15 +174,16 @@ def review_and_fix(lang, L, records, suspects, invoke, judges, other=None, logge
         if not _latin(r.txt) <= _latin(new) or _nums(r.txt) != _nums(new):
             log.append({**entry, "after": new, "status": "rejected: Latin term or number changed"})
             continue
-        if coverage_missing(invoke, r.src, new, L):
+        if coverage_missing(invoke, r.src, new, L, note):
             log.append({**entry, "after": new, "status": "rejected: omission"})
             continue
-        votes = pairwise(judges, L, r.src, prev, nxt, new, r.txt, rng)
+        en_j = r.src + (f" (INTENDED MEANING, verified: {note})" if note else "")
+        votes = pairwise(judges, L, en_j, prev, nxt, new, r.txt, rng)
         if "x" in votes and "y" in votes:
             # a 1-1 split: both judges vote again (fresh A/B order, so position bias evens out); the
             # fix wins with >= 3 of 4 votes and at most 1 against — the rule check_vendor_review
             # uses. In the first test most real fixes were blocked by exactly this split.
-            votes = votes + pairwise(judges, L, r.src, prev, nxt, new, r.txt, rng)
+            votes = votes + pairwise(judges, L, en_j, prev, nxt, new, r.txt, rng)
             ok = votes.count("x") >= 3 and votes.count("y") <= 1
         else:
             ok = "x" in votes and "y" not in votes

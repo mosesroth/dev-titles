@@ -1665,3 +1665,764 @@ def test_run_reuses_the_en_working_copy_after_the_en_stage(tmp_path, monkeypatch
     )
     cli.cmd_run(args)
     assert seen["en"].cues[0].lines == ["built for React 19."]
+    # a delivered EN with a fix the working copy lacks stops the re-run before translation
+    seen.clear()
+    monkeypatch.setattr(cli, "_delivered_en_drift", lambda out, en: "STOP: delivered differs")
+    assert cli.cmd_run(args) == 3 and seen == {}
+    # --transcribe-only still reports the steps it skipped
+    monkeypatch.setattr(cli, "_delivered_en_drift", lambda out, en: "")
+    reported = []
+    monkeypatch.setattr(cli, "_report_degraded", lambda out, cp: reported.append(out) or "")
+    args.transcribe_only = True
+    assert cli.cmd_run(args) == 0 and seen == {} and reported
+    # the first transcription of a video (no EN stage yet) reports too
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    args.out, args.no_qe = str(fresh), True
+    monkeypatch.setattr(cli, "_transcribe_media", lambda *a, **k: ("transcript", None))
+    monkeypatch.setattr(cli, "_apply_speaker_names", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_prep_vocab", lambda args, ri, t, vv: vv)
+    monkeypatch.setattr(cli, "_en_from_transcript", lambda *a, **k: Subtitle("en", []))
+    reported.clear()
+    assert cli.cmd_run(args) == 0 and seen == {} and reported == [fresh]
+
+
+def test_youtube_rate_limit_retries_then_drops_auto_captions():
+    """A 429 on the optional auto-captions must not fail the run (2026-11-04: six queued runs)."""
+    import types
+
+    from dev_titles.ingest import _download
+
+    class DownloadError(Exception):
+        pass
+
+    calls = []
+
+    class YDL:
+        def __init__(self, o):
+            self.o = o
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download):
+            calls.append(self.o["writeautomaticsub"])
+            if self.o["writeautomaticsub"]:
+                raise DownloadError("Unable to download video subtitles for 'en': HTTP Error 429")
+            return {"id": "x"}
+
+        def prepare_filename(self, info):
+            return "x.webm"
+
+    fake = types.SimpleNamespace(
+        YoutubeDL=YDL, utils=types.SimpleNamespace(DownloadError=DownloadError)
+    )
+    slept = []
+    info, path = _download(fake, "u", {"writeautomaticsub": True}, waits=(1, 2), sleep=slept.append)
+    assert path == "x.webm" and calls == [True, True, False] and slept == [1, 2]
+
+
+def test_youtube_other_errors_are_not_retried():
+    import types
+
+    import pytest
+
+    from dev_titles.ingest import _download
+
+    class DownloadError(Exception):
+        pass
+
+    class YDL:
+        def __init__(self, o):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download):
+            raise DownloadError("Video unavailable")
+
+    fake = types.SimpleNamespace(
+        YoutubeDL=YDL, utils=types.SimpleNamespace(DownloadError=DownloadError)
+    )
+    with pytest.raises(DownloadError):
+        _download(fake, "u", {"writeautomaticsub": True}, waits=(1,), sleep=lambda s: None)
+
+
+def test_transcript_captions_written_as_vtt(tmp_path):
+    """yt-dlp needs a PO token for captions now; the transcript endpoint is the fallback."""
+    import types
+
+    from dev_titles.ingest import transcript_captions
+    from dev_titles.transcribe_qe import load_autosub
+
+    snips = [
+        types.SimpleNamespace(
+            start=21.4, duration=3.0, text="done. So, I think getting stuff done in"
+        ),
+        types.SimpleNamespace(start=23.8, duration=2.5, text="end-to-end way for customers"),
+    ]
+    p = transcript_captions("vid", tmp_path / "vid.en.vtt", fetch=lambda v, languages: snips)
+    sub = load_autosub(p)
+    assert [c.text for c in sub.cues][1] == "end-to-end way for customers"
+    assert sub.cues[0].end == 23.8  # rolling captions: ends where the next starts
+
+
+def test_transcript_captions_failure_is_not_fatal(tmp_path):
+    from dev_titles.ingest import transcript_captions
+
+    def boom(v, languages):
+        raise RuntimeError("blocked")
+
+    assert transcript_captions("vid", tmp_path / "x.vtt", fetch=boom) == ""
+
+
+def test_recheck_lists_caption_disagreements_without_applying_them(tmp_path, monkeypatch):
+    """The consult's agreement of two weaker sources was net harmful as auto-apply (28 edits on
+    2026-11-05, 2-3 plausible): it now only lists them; the working copy is never changed."""
+    import types
+
+    from dev_titles import cli, en_gate
+    from dev_titles.model import Cue, Subtitle, Transcript, Word
+
+    en = Subtitle("en", [Cue(0.0, 2.0, ["Vantoo is always pioneering"])]).renumber()
+    cli._write_any(en, str(tmp_path / "en.vtt"))
+    before = (tmp_path / "en.vtt").read_text(encoding="utf-8")
+    (tmp_path / "en_review.md").write_text("# EN review\n", encoding="utf-8")
+    cli._save_raw(Transcript("en", [Word("x", 0.0, 0.4)]), tmp_path / "raw_second.json")
+    args = types.SimpleNamespace(no_qe=False, recover_model="base", device="cpu")
+    ri = types.SimpleNamespace(auto_captions="caps.vtt", path="a.wav")
+    calls = []
+
+    def consult(e, caps, second):
+        calls.append(caps)
+        return [{"ts": "00:00:00", "was": "Vantoo is always", "now": "The view is always"}]
+
+    monkeypatch.setattr(cli, "_caption_consult", consult)
+    en_gate.save_crosscheck(tmp_path, youtube=True, auto_captions=True, second_asr=True)
+    cli._recheck_working_copy(args, ri, en, tmp_path)
+    assert calls == []  # the check already ran when the EN was built
+    en_gate.save_crosscheck(tmp_path, youtube=True, auto_captions=False, second_asr=True)
+    cli._recheck_working_copy(args, ri, en, tmp_path)
+    cli._write_caption_disagreements(tmp_path)  # idempotent: listed once
+    md = (tmp_path / "en_review.md").read_text(encoding="utf-8")
+    assert calls == ["caps.vtt"] and md.count("Auto-caption disagreements") == 1
+    assert (
+        "The view is always" in md and (tmp_path / "en.vtt").read_text(encoding="utf-8") == before
+    )
+    assert not en_gate.crosscheck_missing(tmp_path)
+
+
+def test_correction_with_editing_notes_is_retried_then_falls_back_to_raw():
+    """A cleanup model once wrote its own notes into the EN script."""
+    from dev_titles.cleanup import _correct_chunk, editing_notes
+
+    raw = "when you jump to it and jump into the problem most,ly like you will find not even one library"
+    noted = 'jump into the problem". "most,ly like" -> "mostly". "All right" is backchannel — drop.'
+    assert editing_notes(noted, raw) and not editing_notes(
+        "you will find not even one library", raw
+    )
+    calls = []
+
+    def invoke(prompt):
+        calls.append(prompt)
+        return noted
+
+    assert _correct_chunk(invoke, raw, [], None, True, None) == raw and len(calls) == 2
+    fixed = "when you jump into the problem, mostly you will find not even one library"
+    answers = iter([noted, fixed])
+    assert _correct_chunk(lambda p: next(answers), raw, [], None, True, None) == fixed
+
+
+def test_long_runs_keep_the_mac_awake(monkeypatch):
+    """Overnight 2026-11-05 the Mac idle-slept and a ~2 h translation took 9+ h."""
+    import subprocess
+
+    from dev_titles import cli
+
+    started = []
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/caffeinate")
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **k: started.append(argv))
+    cli._stay_awake()
+    assert started and started[0][:3] == ["caffeinate", "-i", "-w"]
+    assert cli.cmd_run in cli._LONG_COMMANDS
+
+
+def test_a_meaning_note_blocks_a_term_pin_for_its_phrase_but_not_a_word_inside_an_idiom():
+    """The judges wanted 'lexical analysis' as the compiler term 字句解析, while the operator's
+    note said it means reading code as text. The pin must not be harvested."""
+    from types import SimpleNamespace as T
+
+    from dev_titles import translation_qe as tq
+
+    recs = [T(i=0, src="We can't rely on our lexical analysis or the agent.", txt="…")]
+    two = [
+        {"i": 0, "kind": "mqm-major[claude]", "detail": "x"},
+        {"i": 0, "kind": "mqm-major[codex]", "detail": "y"},
+    ]
+    tq.set_meaning_notes(
+        {
+            "0": [{"phrase": "our lexical analysis", "meaning": "reading code as text"}],
+            "5": [{"phrase": "an agent doesn't get tired of you", "meaning": "…"}],
+        }
+    )
+    try:
+        lex = {
+            "source": "lexical analysis",
+            "wrong": "コードをテキストとして読む",
+            "correct": "字句解析",
+        }
+        assert tq.harvest_term_pins(recs, "ja", two, classify=lambda c, s, t: lex)[0] == []
+        agent = {"source": "agent", "wrong": "Agent", "correct": "エージェント"}
+        assert tq.harvest_term_pins(recs, "ja", two, classify=lambda c, s, t: agent)[0]
+        assert not tq.note_covers("ab") and not tq.note_covers("")
+    finally:
+        tq.set_meaning_notes({})
+
+
+def test_meaning_notes_drop_a_persisted_pin_and_reach_the_coverage_gate(monkeypatch):
+    from types import SimpleNamespace as T
+
+    from dev_titles import en_gloss, localize, translation_qe
+
+    notes = {1: [{"phrase": "lexical analysis", "meaning": "reading code as text"}]}
+    monkeypatch.setattr(en_gloss, "meaning_notes", lambda *a, **k: notes)
+    monkeypatch.setattr(localize, "merge_en_to_sentences", lambda en: [])
+    logs = []
+    run = T(
+        en=None,
+        qe_invoke=None,
+        qe_second_judge=None,
+        path=lambda n: n,
+        logger=logs.append,
+        video_vocab={
+            "renderings": {"ja": {"lexical analysis": "字句解析", "Firehose": "Firehose"}}
+        },
+    )
+    try:
+        localize._add_meaning_notes(run, "")
+        assert run.video_vocab["renderings"]["ja"] == {"Firehose": "Firehose"}
+        assert any("dropped" in m for m in logs)
+        prompts = []
+
+        def inv(p):
+            prompts.append(p)
+            return "PRESENT: x\nCOMPLETE"
+
+        s = T(text="We can't rely on our lexical analysis anymore.")
+        localize._coverage_editfix(inv, None, s, "ja", "Japanese", "…", [], 1, print, 1)
+        assert (
+            'INTENDED MEANING (verified): "lexical analysis" = reading code as text' in prompts[0]
+        )
+        localize._coverage_editfix(inv, None, s, "ja", "Japanese", "…", [], 1, print, 2)
+        assert "INTENDED MEANING" not in prompts[1]
+    finally:
+        translation_qe.set_meaning_notes({})
+
+
+def test_a_qe_repair_is_copied_to_a_repeat_with_the_same_english_and_old_translation():
+    """A cold-open teaser repeats a later line; the judges flag one copy (0:09 vs 7:07)."""
+    from types import SimpleNamespace as T
+
+    from helpers import _mqm_by_target_marker
+
+    from dev_titles.translation_qe import build_judges, qe_repair
+
+    line = "We can't really rely on our lexical analysis anymore."
+    recs = [
+        T(i=1, src=line, txt="BAD rendering", residual_miss=""),
+        T(i=2, src="Something else.", txt="BAD rendering", residual_miss=""),
+        T(
+            i=95,
+            src=" we can't really rely on our lexical  analysis anymore.",
+            txt="BAD rendering",
+            residual_miss="",
+        ),
+        T(i=96, src=line, txt="another rendering", residual_miss=""),
+    ]
+    logs = []
+    fixed = qe_repair(
+        recs,
+        "ja",
+        judges=build_judges(_mqm_by_target_marker),
+        lang_name="Japanese",
+        retranslate=lambda rec, crit: "GOOD rendering",
+        per_seg={95: {"critical": 0, "major": 1, "minor": 0}},
+        judge_suspects=[{"i": 95, "kind": "mqm-major", "detail": "wrong sense"}],
+        logger=logs.append,
+    )
+    assert sorted(fixed) == [1, 95]
+    assert [r.txt for r in recs] == [
+        "GOOD rendering",
+        "BAD rendering",
+        "GOOD rendering",
+        "another rendering",
+    ]
+    assert any("repeat #1" in m for m in logs)
+
+
+def test_note_covers_whole_words_only_and_notes_reset_per_video(monkeypatch):
+    from types import SimpleNamespace as T
+
+    from dev_titles import en_gloss, localize
+    from dev_titles import translation_qe as tq
+
+    tq.set_meaning_notes(
+        {0: [{"phrase": "ai", "meaning": "x"}], 1: [{"phrase": "code", "meaning": "y"}]}
+    )
+    try:
+        assert not tq.note_covers("chain") and not tq.note_covers("barcode scanner")
+        assert not tq.note_covers("source code review")  # one word of a longer pin phrase
+        assert tq.note_covers("Code")
+        # a video with no notes clears the previous video's; a null renderings map is fine
+        monkeypatch.setattr(en_gloss, "meaning_notes", lambda *a, **k: {})
+        monkeypatch.setattr(localize, "merge_en_to_sentences", lambda en: [])
+        run = T(
+            en=None,
+            qe_invoke=None,
+            qe_second_judge=None,
+            path=lambda n: n,
+            logger=print,
+            video_vocab={"renderings": {"ja": None}},
+        )
+        localize._add_meaning_notes(run, "")
+        assert not tq.note_covers("code")
+        tq.set_meaning_notes({0: [{"phrase": "lexical analysis", "meaning": "z"}]})
+        monkeypatch.setattr(en_gloss, "meaning_notes", lambda *a, **k: tq._MEANINGS)
+        localize._add_meaning_notes(run, "")
+    finally:
+        tq.set_meaning_notes({})
+
+
+def test_a_repair_is_not_copied_onto_a_protected_editor_rewrite():
+    from types import SimpleNamespace as T
+
+    from dev_titles.translation_qe import _propagate_to_repeats
+
+    recs = [
+        T(i=1, src="Same.", txt="NEW", residual_miss=""),
+        T(i=2, src="Same.", txt="OLD", residual_miss=""),
+    ]
+    assert _propagate_to_repeats(recs, [1], {1: "OLD", 2: "OLD"}, "ja", print, protected={2}) == []
+    assert recs[1].txt == "OLD"
+    assert _propagate_to_repeats(recs, [1], {1: "OLD", 2: "OLD"}, "ja", print) == [2]
+
+
+def test_localize_clears_the_previous_videos_meaning_notes_even_without_the_editor(monkeypatch):
+    from dev_titles import localize
+    from dev_titles import translation_qe as tq
+
+    tq.set_meaning_notes({0: [{"phrase": "lexical analysis", "meaning": "z"}]})
+
+    class Stop(Exception):
+        pass
+
+    def stop(*a, **k):
+        raise Stop
+
+    monkeypatch.setattr(localize, "_translate_lang", stop)
+    import pytest
+
+    monkeypatch.setattr(
+        localize, "llm_serialize_lock", lambda log: __import__("contextlib").nullcontext()
+    )
+    with pytest.raises(Stop):
+        localize.localize_en(
+            Subtitle("en", [Cue(0.0, 1.0, ["Hello."])]).renumber(),
+            None,
+            load("glossary/glossary.yaml"),
+            langs=("ja",),
+            video_vocab={"identifiers": [], "terms": [], "renderings": {}},
+        )
+    assert not tq.note_covers("lexical analysis")
+
+
+def test_a_coined_term_rendered_two_ways_is_flagged_toward_an_existing_rendering():
+    """A coined 'local model cliff' was 転換点 in two lines and 崖 in three of one ja track."""
+    import json as _j
+    from types import SimpleNamespace as T
+
+    from dev_titles.translation_qe import noted_term_inconsistencies
+
+    recs = [
+        T(
+            i=1,
+            src="there's going to be a local model cliff eventually.",
+            txt="いずれローカルモデルへの転換点が来ます",
+        ),
+        T(i=2, src="The cliff you're talking about.", txt="おっしゃっている「崖」"),
+        T(i=3, src="So the local model cliff.", txt="ローカルモデルの「崖」ですが"),
+        T(
+            i=4,
+            src="that feeds into that local model clip",
+            txt="ローカルモデルへの転換点につながる",
+        ),
+        T(i=5, src="Unrelated line.", txt="関係ない"),
+    ]
+    notes = {
+        "1": [
+            {
+                "phrase": "local model cliff",
+                "meaning": "tipping point when local models are good enough",
+            }
+        ],
+        "4": [
+            {
+                "phrase": "local model clip",
+                "meaning": "mis-said 'local model cliff': the tipping point",
+            }
+        ],
+    }
+    seen = []
+
+    def inv(p):
+        seen.append(p)
+        return _j.dumps({"consistent": False, "rendering": "転換点", "fix": [3, 99]})
+
+    out = noted_term_inconsistencies(recs, inv, "Japanese", notes)
+    assert (
+        len(seen) == 1 and "[4]" in seen[0] and "[5]" not in seen[0]
+    )  # the mis-said variant counts
+    assert out and out[0]["source"] == "local model cliff" and out[0]["target"] == "転換点"
+    assert out[0]["fix_idx"] == [3] and out[0]["kind"] == "term-inconsistency"
+    # an invented rendering (not used in any other line) is ignored; so is a consistent verdict
+    assert (
+        noted_term_inconsistencies(
+            recs,
+            lambda p: _j.dumps({"consistent": False, "rendering": "分岐点", "fix": [2]}),
+            "Japanese",
+            notes,
+        )
+        == []
+    )
+    assert (
+        noted_term_inconsistencies(recs, lambda p: '{"consistent": true}', "Japanese", notes) == []
+    )
+    # a phrase that occurs once is never asked about
+    assert noted_term_inconsistencies(recs[:1], inv, "Japanese", notes) == [] and len(seen) == 1
+
+
+def test_the_repair_pass_sends_coined_term_lines_to_qe_repair(monkeypatch):
+    from types import SimpleNamespace as T
+
+    from dev_titles import localize, translation_qe
+
+    monkeypatch.setattr(localize, "make_retranslate", lambda *a, **k: (lambda rec, crit: rec.txt))
+    noted = [
+        {
+            "i": None,
+            "kind": "term-inconsistency",
+            "source": "local model cliff",
+            "target": "転換点",
+            "detail": "d",
+            "fix_idx": [3],
+        }
+    ]
+    monkeypatch.setattr(translation_qe, "noted_term_inconsistencies", lambda recs, inv, name: noted)
+    seen = {}
+    monkeypatch.setattr(translation_qe, "qe_repair", lambda *a, **k: seen.update(k) or [])
+    logs = []
+    run = T(
+        qe_repair=True,
+        qe_invoke=lambda p: "",
+        qe_second_judge=None,
+        cache_path=None,
+        native_editor=False,
+        en=None,
+        translator=None,
+        glossary=None,
+        video_vocab={},
+        invoke=None,
+        backcheck=False,
+        conversational=False,
+        logger=logs.append,
+    )
+    L = T(
+        dqf={"per_seg": {}},
+        prior=None,
+        has_major=False,
+        lang="ja",
+        name="Japanese",
+        records=[],
+        suspects=[],
+        bank=None,
+    )
+    localize._qe_repair_pass(run, L)
+    assert "転換点" in seen["extra_critiques"][3] and noted[0] in L.suspects and logs == ["ja: d"]
+
+    def boom(*a):
+        raise RuntimeError
+
+    from dev_titles import degraded
+
+    degraded.reset()
+    monkeypatch.setattr(translation_qe, "noted_term_inconsistencies", boom)
+    localize._qe_repair_pass(run, L)
+    assert degraded.steps() == ["ja: coined-term consistency check skipped (RuntimeError)"]
+    degraded.reset()
+
+
+def test_coined_term_matching_is_whole_words():
+    from types import SimpleNamespace as T
+
+    from dev_titles.translation_qe import noted_term_inconsistencies
+
+    recs = [T(i=1, src="a real cliffhanger", txt="x"), T(i=2, src="the cliff here", txt="y")]
+    asked = []
+    noted_term_inconsistencies(
+        recs,
+        lambda p: asked.append(p) or "{}",
+        "Japanese",
+        {"1": [{"phrase": "cliff", "meaning": "m"}]},
+    )
+    assert asked == []  # 'cliffhanger' is not the term: only one real occurrence
+
+
+def test_coined_term_check_runs_on_a_rerun_without_majors_and_survives_bad_json(monkeypatch):
+    from types import SimpleNamespace as T
+
+    from dev_titles import localize, translation_qe
+
+    real = translation_qe.noted_term_inconsistencies
+
+    monkeypatch.setattr(localize, "make_retranslate", lambda *a, **k: (lambda rec, crit: rec.txt))
+    seen = {}
+    monkeypatch.setattr(translation_qe, "qe_repair", lambda *a, **k: seen.update(k) or [])
+    run = T(
+        qe_repair=True,
+        qe_invoke=lambda p: "",
+        qe_second_judge=None,
+        cache_path=None,
+        native_editor=False,
+        en=None,
+        translator=None,
+        glossary=None,
+        video_vocab={},
+        invoke=None,
+        backcheck=False,
+        conversational=False,
+        logger=lambda m: None,
+    )
+    L = T(
+        dqf={"per_seg": {}},
+        prior={"x": 1},
+        has_major=False,
+        lang="ja",
+        name="Japanese",
+        records=[],
+        suspects=[],
+        bank=None,
+    )
+    monkeypatch.setattr(translation_qe, "noted_term_inconsistencies", lambda r, i, n: [])
+    localize._qe_repair_pass(run, L)
+    assert seen == {}  # a clean re-run: nothing to repair
+    noted = [
+        {
+            "i": None,
+            "kind": "term-inconsistency",
+            "source": "x",
+            "target": "y",
+            "detail": "d",
+            "fix_idx": [2],
+        }
+    ]
+    monkeypatch.setattr(translation_qe, "noted_term_inconsistencies", lambda r, i, n: noted)
+    localize._qe_repair_pass(run, L)
+    assert 2 in seen["extra_critiques"]  # the coined-term inconsistency alone triggers the repair
+    # model JSON with a non-list "fix" is ignored, not a crash
+    recs = [
+        T(i=1, src="the local model cliff", txt="転換点"),
+        T(i=2, src="that cliff, the local model cliff", txt="崖"),
+    ]
+    notes = {"1": [{"phrase": "local model cliff", "meaning": "m"}]}
+    assert (
+        real(
+            recs,
+            lambda p: '{"consistent": false, "rendering": "転換点", "fix": 5}',
+            "Japanese",
+            notes,
+        )
+        == []
+    )
+    assert real(recs, lambda p: "[1, 2]", "Japanese", notes) == []
+
+
+def test_a_persons_first_name_alone_is_kept_latin_but_not_a_common_word():
+    from dev_titles.glossary import Glossary
+    from dev_titles.localize import keep_latin_terms
+
+    vv = {
+        "names": [
+            "Dario Velasco",
+            "Will Smith",
+            "Marcus Lindqvist",
+            "Cher",
+            "Łukasz Nowak",
+            "Émile Zola",
+        ]
+    }
+    dnt = keep_latin_terms(Glossary(version="1", languages=["zh-Hans"], terms=[]), vv, "zh-Hans")
+    assert "Dario" in dnt and "Marcus" in dnt and "Dario Velasco" in dnt
+    assert "Łukasz" in dnt and "Émile" in dnt  # accented capitals too
+    assert (
+        "Will" not in dnt and "Cher" in dnt
+    )  # a common word stays translatable; a one-word name is itself
+
+
+def test_a_long_noted_phrase_is_not_a_coined_term():
+    from types import SimpleNamespace as T
+
+    from dev_titles.translation_qe import noted_term_inconsistencies
+
+    long = "starting to mainline the idea that all platforms are platforms"
+    recs = [T(i=1, src=f"we are {long}", txt="a"), T(i=2, src=f"and {long} again", txt="b")]
+    asked = []
+    noted_term_inconsistencies(
+        recs,
+        lambda p: asked.append(p) or "{}",
+        "Japanese",
+        {"1": [{"phrase": long, "meaning": "m"}]},
+    )
+    assert asked == []
+
+
+def test_restoring_a_keep_latin_name_needs_no_second_judge():
+    from types import SimpleNamespace as T
+
+    from dev_titles.translation_qe import harvest_term_pins
+
+    recs = [T(i=3, src="Great to chat with Dario today", txt="很高兴能和达里奥一起聊聊")]
+    one_judge = [{"i": 3, "kind": "mqm-minor[claude]", "detail": "name should stay Latin"}]
+    fix = {"source": "Dario", "wrong": "达里奥", "correct": "Dario"}
+    pins, _ = harvest_term_pins(
+        recs, "zh-Hans", one_judge, classify=lambda c, s, t: fix, keep_latin=["Dario"]
+    )
+    assert pins and pins[0]["correct"] == "Dario"
+    # the same single-judge CJK flip for a name NOT kept Latin is still held
+    pins, _ = harvest_term_pins(
+        recs, "zh-Hans", one_judge, classify=lambda c, s, t: fix, keep_latin=[]
+    )
+    assert pins == []
+
+
+def test_a_lock_survives_a_small_english_edit_but_not_a_fixed_name():
+    from types import SimpleNamespace as T
+
+    from dev_titles.localize import SentenceRecord, _lock_survives, _reuse_record
+
+    cliff = SentenceRecord(
+        "ja",
+        179,
+        "And that feeds into that local model clip that I was talking about.",
+        "ローカルモデルの「崖」につながるんです",
+        "",
+        [],
+        locked=True,
+    )
+    new = "And that feeds into that local model cliff that I was talking about."
+    assert _lock_survives(cliff, new)
+    logs = []
+    rec, _ = _reuse_record(179, T(text=new), {179: cliff}, {}, None, "ja", None, logs.append)
+    assert rec.txt == cliff.txt and rec.locked and rec.src == new and "kept" in logs[0]
+    name = SentenceRecord(
+        "ja",
+        138,
+        "we heard about this today from Lukash",
+        "今日Lukashさんから聞きました",
+        "",
+        [],
+        locked=True,
+    )
+    assert not _lock_survives(
+        name, "we heard about this today from Łukasz"
+    )  # the old name is in the target
+    assert (
+        _reuse_record(
+            138,
+            T(text="we heard about this today from Łukasz"),
+            {138: name},
+            {},
+            None,
+            "ja",
+            None,
+            logs.append,
+        )
+        is None
+    )
+    assert "RE-TRANSLATED" in logs[-1]
+    assert not _lock_survives(cliff, "Something else entirely was said here.")
+
+
+def test_a_locked_rendering_wins_the_coined_term_check():
+    import json as _j
+    from types import SimpleNamespace as T
+
+    from dev_titles.translation_qe import noted_term_inconsistencies
+
+    notes = {"1": [{"phrase": "local model cliff", "meaning": "tipping point"}]}
+    recs = [
+        T(
+            i=1,
+            src="a local model cliff eventually",
+            txt="「ローカルモデルの崖」が来る",
+            locked=True,
+        ),
+        T(
+            i=2,
+            src="that local model cliff I mentioned",
+            txt="ローカルモデルの転換点につながる",
+            locked=False,
+        ),
+        T(i=3, src="the local model cliff again", txt="ローカルモデルの転換点", locked=False),
+    ]
+    toward_unlocked = lambda p: _j.dumps(
+        {"consistent": False, "rendering": "転換点", "fix": [1]}
+    )  # noqa: E731
+    assert noted_term_inconsistencies(recs, toward_unlocked, "Japanese", notes) == []
+    toward_locked = lambda p: _j.dumps(
+        {"consistent": False, "rendering": "崖", "fix": [1, 2, 3]}
+    )  # noqa: E731
+    out = noted_term_inconsistencies(recs, toward_locked, "Japanese", notes)
+    assert (
+        out and out[0]["target"] == "崖" and out[0]["fix_idx"] == [2, 3]
+    )  # the locked line is never 'fixed'
+
+
+def test_lock_survival_matches_whole_words():
+    from dev_titles.localize import SentenceRecord, _lock_survives
+
+    rec = SentenceRecord(
+        "ja",
+        1,
+        "run the app create-expo-app now",
+        "create-expo-appを実行します",
+        "",
+        [],
+        locked=True,
+    )
+    assert _lock_survives(
+        rec, "run the create-expo-app now"
+    )  # 'app' removed, but it isn't a word in the target
+
+
+def test_a_lock_does_not_survive_added_content():
+    from dev_titles.localize import SentenceRecord, _lock_survives
+
+    rec = SentenceRecord(
+        "ja",
+        1,
+        "that feeds into that local model clip",
+        "ローカルモデルの「崖」につながる",
+        "",
+        [],
+        locked=True,
+    )
+    assert _lock_survives(rec, "that feeds into that local model cliff")
+    assert not _lock_survives(rec, "that feeds into that broken local model clip")

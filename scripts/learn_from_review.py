@@ -60,6 +60,15 @@ GLOSSARY = ROOT / "glossary" / "glossary.yaml"
 OUTPUT = Path(os.environ.get("DEV_TITLES_OUTPUT", "output")).resolve()  # deliverables root
 
 
+def _reviewed_dir() -> Path:
+    """The reviewer corpus root (from the usual reviewed-files glob). Counter-evidence is read from
+    the REVIEWERS' own finals only: the deliverables root also holds our own unreviewed tracks,
+    which are no evidence of what a reviewer keeps."""
+    from dev_titles.latin_names import default_reviewed_glob
+
+    return Path(default_reviewed_glob().split("*")[0] or ".").resolve()
+
+
 def _rows(a, run: Path, sents) -> list[dict]:
     if a.rows:
         d = json.loads(Path(a.rows).read_text(encoding="utf-8"))[a.lang]
@@ -111,7 +120,10 @@ def main(argv=None) -> int:
     ap.add_argument("--human", help="the reviewer's final subtitle file (when no --rows)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--apply", action="store_true")
-    ap.add_argument("--max-validate", type=int, default=12)
+    # no cap by default: a lesson left unvalidated is a lesson lost; the only saving was time
+    ap.add_argument(
+        "--max-validate", type=int, default=None, help="validate at most N (default: all)"
+    )
     a = ap.parse_args(argv)
     if not a.rows and not a.human:
         ap.error("--rows or --human is required")
@@ -125,6 +137,13 @@ def main(argv=None) -> int:
     L = LANG_NAME[a.lang]
     g0 = load(str(GLOSSARY))
     kept = human_better_rows(rows, judges, L)
+    # the aligned rows feed the cross-video convention mining (scripts/learn_review_batch.py)
+    (out / "rows.json").write_text(
+        json.dumps(
+            [{**r, "video": run.name} for r in rows], ensure_ascii=False, indent=0, default=str
+        ),
+        encoding="utf-8",
+    )
     print(f"{len(kept)} row(s) where the reviewer's line is better (both judges)")
     st = (g0.style or {}).get(a.lang, {}) or {}
     notes = (st.get("notes_conversational") or "") + "\n" + (st.get("notes") or "")
@@ -183,6 +202,8 @@ def main(argv=None) -> int:
         for r in json.loads(rp.read_text(encoding="utf-8")).get(a.lang, []):
             pairs.append((r["en"], r.get("human", ""), rp.parent.parent.name))
     accepted, rejected = [], []
+    # over the cap: reported, not dropped silently (they were, until 2026-11-04)
+    unvalidated = todo[a.max_validate :] if a.max_validate is not None else []
     for x in todo[: a.max_validate]:
         if x["kind"] == "fixed_line":
             ok, why = fixed_line_established(x, pairs)
@@ -194,7 +215,7 @@ def main(argv=None) -> int:
             accepted.append({**x, "validation": "n/a (editor pass gates examples)"})
             continue
         if x["kind"] == "glossary_term":
-            counter = reviewer_counterevidence(x, OUTPUT / "FINAL_SUBTITLES", run.name)
+            counter = reviewer_counterevidence(x, _reviewed_dir(), run.name)
             if sum(int(h.rsplit("x", 1)[1]) for h in counter) >= 2:
                 rejected.append(
                     {**x, "validation": {"score": {"reviewers_keep_avoided_form": counter}}}
@@ -224,14 +245,17 @@ def main(argv=None) -> int:
         "",
         f"- reviewer better (both judges): {len(kept)} row(s)",
         f"- lessons proposed: {len(lessons)}; accepted {len(accepted)}, rejected {len(rejected)}, "
-        f"need a person {len(person)}",
+        f"need a person {len(person)}, not validated (over --max-validate) {len(unvalidated)}",
         "",
     ]
     for title, xs in (
         ("Accepted", accepted),
         ("Rejected by validation", rejected),
         ("Needs a person", person),
+        (f"Not validated (over --max-validate {a.max_validate})", unvalidated),
     ):
+        if not xs and title.startswith("Not validated"):
+            continue
         rep += [f"## {title}", ""]
         for x in xs:
             ev = x["evidence"][0]
@@ -249,7 +273,12 @@ def main(argv=None) -> int:
     (out / "REPORT.md").write_text("\n".join(rep), encoding="utf-8")
     (out / "lessons.json").write_text(
         json.dumps(
-            {"accepted": accepted, "rejected": rejected, "person": person},
+            {
+                "accepted": accepted,
+                "rejected": rejected,
+                "person": person,
+                "unvalidated": unvalidated,
+            },
             ensure_ascii=False,
             indent=1,
             default=str,

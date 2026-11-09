@@ -71,7 +71,98 @@ def _norm(s):
 
 
 def _flat(c):
-    return c.text.replace("\n", "")
+    # a name broken across the two lines ("React Native" / "DevTools") keeps its space: joined
+    # without one, the proofreader reported "React NativeDevTools" / "forWindows" as misspellings
+    return re.sub(r"(?<=[A-Za-z0-9])\n(?=[A-Za-z0-9])", " ", c.text).replace("\n", "")
+
+
+_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’+./\-]*(?: [A-Za-z0-9][A-Za-z0-9'’+./\-]*)*")
+
+
+def _key(s):
+    # only case, spacing, apostrophes, hyphens and "Plus" for "+" may differ: "Expo Dev Awards" is
+    # not a misspelling of expo.dev/awards
+    return re.sub(r"[\s'’\-]", "", re.sub(r"\s+plus\b", "+", s.lower()))
+
+
+def rule_fixes(rev, en, lang, applied_variants):
+    """Errors a meaning judge can't see, fixed without a vote (the blind check asks "which is a correct
+    translation?" and answers "both" for them). On one batch all of these survived it:
+      - a name spelled differently from the English: "Wits End" for Wit's End, "Nimbus Plus" for Nimbus+;
+      - an enumeration that lost its separator: "Expo Expo的工具" for "Expo, Expo's Tools";
+      - a glossary avoid-variant left on some lines of a track after the same fix won the vote on
+        others (挂钩 -> Hook fixed 3x, one 挂钩 left) — unless the vendor's form won a vote there.
+    `applied_variants` = {(bad, good)} of glossary fixes already applied in this track.
+    Returns {cue_no: (reason, fixed line)}."""
+    out = {}
+    for k, c in enumerate(rev, 1):
+        txt = _flat(c)
+        ew = " ".join(e.text for e in en if e.start < c.end + 1.5 and e.end > c.start - 1.5).split()
+        # English names: 1-4 word spans that don't cross punctuation ("Apple TV, tvOS" is two names)
+        spans: list[list[str]] = [[]]
+        for w in ew:
+            t = w.strip(',.?!;:"()—–')
+            if t:
+                spans[-1].append(t)
+            if not t or w[-1] in ",.?!;:":
+                spans.append([])
+        # name-like only: an apostrophe, +, / or a capital after the first letter (Wit's End, Nimbus+,
+        # CI/CD, SAM); "Hi there" or a sentence-start "Hooks" is not a name
+        names = sorted(
+            {
+                g
+                for sp in spans
+                for n in (4, 3, 2, 1)
+                for i in range(len(sp) - n + 1)
+                for g in [" ".join(sp[i : i + n])]
+                if re.search(r"['’+/]|.[A-Z]", g)
+            },
+            key=len,
+            reverse=True,
+        )
+        why, new = [], txt
+        for run in _RUN.findall(txt):
+            words = run.rstrip(".,").split()
+            for n in range(len(words), 0, -1):
+                for i in range(len(words) - n + 1):
+                    sub = " ".join(words[i : i + n])
+                    hit = next(
+                        (
+                            g
+                            for g in names
+                            if g != sub and _key(g) == _key(sub) and len(_key(g)) >= 3
+                        ),
+                        None,
+                    )
+                    if (
+                        hit
+                        and sub in new
+                        and not re.search(rf"(?<!\w){re.escape(sub)}(?!\w)", " ".join(ew))
+                    ):
+                        new = new.replace(sub, hit)
+                        why.append(f"name spelled as in the English: '{sub}' -> '{hit}'")
+        for m in re.finditer(r"(?<![A-Za-z0-9])([A-Z][A-Za-z0-9]+) \1(?![A-Za-z0-9])", new):
+            w = m.group(1)
+            if re.search(rf"\b{re.escape(w)}, {re.escape(w)}", " ".join(ew)):
+                new = new.replace(m.group(0), f"{w}、{w}", 1)
+                why.append(f"separator restored: '{w} {w}' -> '{w}、{w}' (English: '{w}, {w}')")
+        for bad, good in applied_variants:
+            if not re.fullmatch(r"[\x20-\x7e]+", bad):
+                if bad in new:
+                    new = new.replace(bad, good)
+                    why.append(
+                        f"'{bad}' -> {good}: the same glossary fix won the vote in this track"
+                    )
+                continue
+            # a Latin variant: whole words only, and never where the English has it verbatim — the
+            # command `npm run android` is not a misspelling of Android
+            pat = rf"(?<![A-Za-z0-9]){re.escape(bad)}(?![A-Za-z0-9])"
+            if re.search(pat, new) and not re.search(pat, " ".join(ew)):
+                new = re.sub(pat, good, new)
+                why.append(f"'{bad}' -> {good}: glossary spelling of the name")
+        if why and new != txt:
+            out[k] = ("; ".join(why), new)
+    return out
 
 
 def _json(s, kind="["):
@@ -80,6 +171,12 @@ def _json(s, kind="["):
         return json.loads(m.group(0)) if m else ([] if kind == "[" else {})
     except Exception:
         return [] if kind == "[" else {}
+
+
+def _variant(error):
+    """("挂钩", "Hook") from a protected_flags avoid-variant message, else (None, None)."""
+    m = re.match(r"'(.+?)' is a glossary avoid-variant of '.+?' -> (.+)$", error or "")
+    return (m.group(1), m.group(2)) if m else (None, None)
 
 
 def video_name(path: Path) -> str:
@@ -175,7 +272,17 @@ def main():
         help="the version the vendor reviewed: <video>.<lang>.srt",
     )
     ap.add_argument("--ticket-dir", default="output/ticket", help="<video>/en.vtt for the English")
-    ap.add_argument("--glossary", default="glossary/glossary.yaml")
+    ap.add_argument(
+        "--glossary",
+        default=str(Path(__file__).resolve().parents[1] / "glossary" / "glossary.yaml"),
+    )
+    ap.add_argument(
+        "--reuse",
+        action="store_true",
+        help="reuse the proofread findings and votes in <out>/check_state.json (re-run after a "
+        "checker fix without new model calls for unchanged candidates)",
+    )
+    ap.add_argument("--no-learn", action="store_true", help="don't start learn_review_batch.py")
     ap.add_argument("--dry-run", action="store_true", help="report only; write no subtitle files")
     a = ap.parse_args()
     lang, L, out = a.lang, LANG_NAME[a.lang], Path(a.out)
@@ -187,6 +294,11 @@ def main():
         (second, claude) if second else (claude,)
     )  # different-family judge first when available
     rng = random.Random(0)
+    prior = (
+        json.loads((out / "check_state.json").read_text(encoding="utf-8"))
+        if a.reuse and (out / "check_state.json").exists()
+        else {}
+    )
     state, report, applied = {}, [f"# Vendor review check ({lang}): {a.reviewed_dir}", ""], []
     stage = out / "_stage"
     stage.mkdir(exist_ok=True)
@@ -210,24 +322,34 @@ def main():
         )
         changed = sum(_norm(x.text) != _norm(y.text) for x, y in zip(ours, rev)) if same else None
         flags = protected_flags(rev, ours, lang, gl)
-        cands = {}
+        cands: dict = {}
         for k, why, fix in flags:
             if fix:
                 cands.setdefault(k, {"id": k, "error": why, "fix": fix, "source": "glossary"})
-        for p in proofread(rev, ours, en, L, claude):
+        old = [c for c in (prior.get(v) or {}).get("candidates", []) if c.get("source") != "rule"]
+        found = (
+            [c for c in old if c.get("source") == "proofread"]
+            if v in prior
+            else proofread(rev, ours, en, L, claude)
+        )
+        for p in found:
             k = p.get("id")
             if not isinstance(k, int) or not 1 <= k <= len(rev) or k in cands:
                 continue
             # a fix must be an edit of the vendor's line, not a rewrite
             if difflib.SequenceMatcher(None, _flat(rev[k - 1]), p["fix"]).ratio() < 0.5:
                 continue
-            cands[k] = {**p, "source": "proofread"}
+            cands[k] = {"id": k, "error": p["error"], "fix": p["fix"], "source": "proofread"}
+        seen = {(c["id"], c["fix"]): c.get("votes") for c in old if c.get("votes")}
+        todo = {k: c for k, c in cands.items() if (k, c["fix"]) not in seen}
         with ThreadPoolExecutor(8) as ex:
             votes = dict(
                 zip(
-                    cands, ex.map(lambda c: blind_votes(c, rev, en, L, judges, rng), cands.values())
+                    todo,
+                    ex.map(lambda c: blind_votes(c, rev, en, L, judges, rng), todo.values()),
                 )
             )
+        votes.update({k: seen[(k, c["fix"])] for k, c in cands.items() if k not in todo})
         ok = []
         for k, c in sorted(cands.items()):
             vs = votes[k]
@@ -244,6 +366,28 @@ def main():
             if c["applied"]:
                 ok.append(c)
                 rev[k - 1].lines = [c["fix"]]
+        bad_good = {
+            (b, g) for c in ok if c["source"] == "glossary" for b, g in [_variant(c["error"])] if b
+        }
+        # the vendor's form won a vote on these lines: context decides there (令牌 for an auth token)
+        vendor_won = {k for k, c in cands.items() if "vendor" in c["votes"]}
+        # a Latin avoid-variant of a Latin name ("Nimbus Plus" for Nimbus+) is a misspelling anywhere
+        bad_good |= {
+            (b, t.translations[lang])
+            for t in gl.terms
+            if re.fullmatch(r"[\x20-\x7e]+", t.translations.get(lang) or "")
+            for b in (getattr(t, "avoid", {}) or {}).get(lang, []) or []
+            if b and re.fullmatch(r"[\x20-\x7e]+", b)
+        }
+        for k, (why, fix) in rule_fixes(rev, en, lang, bad_good).items():
+            if k in vendor_won and not why.startswith("name") and "separator" not in why:
+                continue
+            c = cands.get(k) or {"id": k, "source": "rule"}
+            c.update(error=why, fix=fix, votes=["rule"], applied=True, kind="rule (no vote)")
+            cands[k] = c
+            if c not in ok:
+                ok.append(c)
+            rev[k - 1].lines = [fix]
         sync = sync_report(rev, getattr(en, "cues", en))
         state[v] = {
             "sync": sync,
@@ -287,10 +431,23 @@ def main():
     )
     if not a.dry_run:
         subprocess.run(
-            [sys.executable, "scripts/rewrap_reviewed.py", str(stage), "--out", str(out)],
+            [
+                sys.executable,
+                str(Path(__file__).with_name("rewrap_reviewed.py")),
+                str(stage),
+                "--out",
+                str(out),
+                "--no-learn",
+            ],
             check=True,
         )
     print((out / "REPORT.md").read_text(encoding="utf-8"))
+    if not a.dry_run and not a.no_learn:
+        # learn from the review: automatic, never a separate step (learn_review_batch.py)
+        sys.path.insert(0, str(Path(__file__).parent))
+        from learn_review_batch import launch_detached
+
+        launch_detached(a.reviewed_dir)
 
 
 if __name__ == "__main__":

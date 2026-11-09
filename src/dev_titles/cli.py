@@ -14,10 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import degraded as _degraded
 from .config import spec_for
 from .cue_builder import build_en_cues
 
@@ -227,7 +229,7 @@ def _clean_read_stage(en, out, invoke, title: str, en_style: str | None):
         try:
             en_c, cleaned, rejected = clean_read(en, invoke)
         except Exception as e:
-            print(f"EN clean-read skipped ({type(e).__name__})")
+            print(f"{_degraded.note('EN clean-read', e)}")
             en_c = en
         if cleaned:
             _write_en_keep_orig(out, en, en_c)
@@ -308,7 +310,7 @@ def _meaning_holds(en, out, invoke) -> list[dict]:
             verify=second,
         )
     except Exception as e:  # never sink the EN review on it
-        print(f"meaning check skipped ({type(e).__name__})")
+        print(f"{_degraded.note('meaning check', e)}")
         return []
     held = []
     for d in disputed(o / "meaning_notes.json"):
@@ -322,6 +324,38 @@ def _meaning_holds(en, out, invoke) -> list[dict]:
             }
         )
     return held
+
+
+def _names_and_slips(en, out, invoke, title: str = ""):
+    """en_names.check with the video's own evidence (title, description, brief, known names, the
+    verified meaning notes). (en, en_review.md lines, held items); never sinks the review."""
+    import types
+
+    from . import en_names
+
+    o = Path(out)
+    second = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
+
+    def read(name):
+        return (o / name).read_text(encoding="utf-8") if (o / name).exists() else ""
+
+    try:
+        notes = json.loads(read("meaning_notes.json") or "{}").get("notes") or {}
+        en, applied, held = en_names.check(
+            en,
+            [invoke] + ([second] if second else []),
+            title=title,
+            description=read("description.txt"),
+            brief=read("video_brief.txt"),
+            known=_known_names(o, en),
+            notes=notes,
+        )
+    except Exception as e:
+        print(f"{_degraded.note('EN names/slips check', e)}")
+        return en, [], []
+    if applied or held:
+        print(f"EN names/slips: {len(applied)} corrected, {len(held)} held")
+    return en, en_names.section(applied), held
 
 
 def _en_review(en, out, title: str = "", en_style: str | None = None):
@@ -380,11 +414,27 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
         return en
     if not issues:
         mh = _meaning_holds(en, out, invoke)
+        import copy
+
+        en0 = en  # check() edits in place: it gets a copy, `en0` stays the reviewed original
+        en, ns_lines, ns_held = _names_and_slips(copy.deepcopy(en), out, invoke, title)
+        if ns_lines:
+            _write_en_keep_orig(out, en0, en)
+        mh = mh + ns_held
+        cr_lines = cr_lines + ns_lines
         en_gate.save_review_state(out, "ok", mh)
         rpath.write_text(
-            f"# EN editorial review — {title}\n\n"
-            + "\n".join(cr_lines)
-            + ("\nNo editorial issues flagged.\n" if not mh else _en_review_md(title, [], [], mh)),
+            (
+                _en_review_md(title, cr_lines, [], mh)
+                if mh
+                else f"# EN editorial review — {title}\n\n"
+                + "\n".join(cr_lines)
+                + (
+                    "\nNo other editorial issues flagged.\n"
+                    if ns_lines
+                    else "\nNo editorial issues flagged.\n"
+                )
+            ),
             encoding="utf-8",
         )
         print(
@@ -395,17 +445,185 @@ def _en_review(en, out, title: str = "", en_style: str | None = None):
     try:
         new_en, applied, held = en_autofix(en, issues, invoke)
     except Exception as e:
-        print(f"EN autofix skipped ({type(e).__name__})")
+        print(f"{_degraded.note('EN autofix', e)}")
         new_en, applied, held = en, [], issues
-    if applied:  # persist corrected EN; keep the original
+    new_en, tie, held = _caption_tiebreak(new_en, held, out, invoke)
+    tie = tie or []
+    if applied or tie:  # persist corrected EN; keep the original
         _write_en_keep_orig(out, en, new_en)
     held = held + _meaning_holds(new_en, out, invoke)
+    if new_en is en:  # check() edits in place; `en` must stay the pre-review original
+        import copy
+
+        new_en = copy.deepcopy(en)
+    new_en, ns_lines, ns_held = _names_and_slips(new_en, out, invoke, title)
+    if ns_lines:  # en.orig.vtt keeps the earliest original either way
+        _write_en_keep_orig(out, en, new_en)
+    held = held + ns_held
+    cr_lines = cr_lines + ns_lines
     rpath.write_text(_en_review_md(title, cr_lines, applied, held), encoding="utf-8")
+    if tie:
+        from .caption_tiebreak import section
+
+        with open(rpath, "a", encoding="utf-8") as fh:
+            fh.write(section(tie))
+    applied = applied + tie
     en_gate.save_review_state(
         out, "ok", [{k: s.get(k, "") for k in ("ts", "kind", "detail")} for s in held], len(applied)
     )
     print(f"EN review: {len(applied)} auto-applied, {len(held)} held -> {rpath}")
     return new_en
+
+
+def _caption_tiebreak(en, held, out, invoke, log=None):
+    """Held likely-mishears resolved with the YouTube auto-captions as evidence (caption_tiebreak):
+    both model families must agree and every new word must have been heard. (en, resolved, held);
+    resolved is None when it couldn't run (no captions / no second model)."""
+    import types
+
+    from . import caption_tiebreak as ct
+    from .transcribe_qe import load_autosub
+
+    o = Path(out)
+    cap = ct.captions_file(o)
+    if not cap:
+        return en, None, held
+    if not any(h.get("kind") in ct.KINDS for h in held):
+        return en, [], held
+    second_judge = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
+    if second_judge is None:
+        return en, None, held
+    try:
+        en, resolved, held = ct.resolve(
+            en,
+            held,
+            load_autosub(cap),
+            _load_raw(o / "raw_second.json") if (o / "raw_second.json").exists() else None,
+            [invoke, second_judge],
+            brief=(
+                (o / "video_brief.txt").read_text(encoding="utf-8")
+                if (o / "video_brief.txt").exists()
+                else ""
+            ),
+            words=_load_raw(o / "raw.json").words if (o / "raw.json").exists() else None,
+            log=log,
+            known=_known_names(o, en),
+        )
+    except Exception as e:
+        print(f"{_degraded.note('  caption tiebreak', e)}")
+        return en, None, held
+    held = ct.drop_moot_meaning(held, resolved)
+    print(f"EN caption tiebreak: {len(resolved)} held line(s) resolved with the YouTube captions")
+    return en, resolved, held
+
+
+def _known_names(o: Path, en) -> str:
+    """Names and identifiers this video uses (vocab-prep) plus glossary people whose name or
+    company appears in it — evidence for a name the recognizers can't spell ('Lukash' = Łukasz)."""
+    import yaml
+
+    text = " ".join(" ".join(c.lines) for c in en.cues).lower()
+    out: list[str] = []
+    vp = o / "vocab.json"
+    if vp.exists():
+        v = json.loads(vp.read_text(encoding="utf-8"))
+        out += [str(x) for x in (v.get("names") or []) + (v.get("identifiers") or [])]
+    from .glossary import glossary_dir
+
+    np_ = glossary_dir() / "names.yaml"
+    if np_.exists():
+        for e in (yaml.safe_load(np_.read_text(encoding="utf-8")) or {}).get("people", []) or []:
+            name, role = str(e.get("name", "")), str(e.get("role", ""))
+            # the person's own name or their company — not job-title words ('Principal Engineer')
+            company = role.split(" at ")[-1] if " at " in role else role.split(",")[-1]
+            toks = [t for t in re.split(r"\W+", f"{name} {company}") if len(t) >= 4]
+            if " at " not in role and "," not in role:
+                toks = [t for t in re.split(r"\W+", name) if len(t) >= 4]
+            if any(re.search(rf"\b{re.escape(t.lower())}", text) for t in toks):
+                out.append(name)
+    # the video's own title / description name its event, product and people ('next.app devCon')
+    dp = o / "description.txt"
+    if dp.exists():
+        out.append(" ".join(dp.read_text(encoding="utf-8").split())[:600])
+    return ", ".join(dict.fromkeys(out))
+
+
+# 3: + sound-alike context fixes, glossary people as evidence, no confirm on terminology
+# 4: + favor the sensible HEARD reading; meaning conflicts need both families, with context
+# 5: + held items found when their timestamp drifted from the cue
+# 6: + title/description as evidence; edge tolerance in confirm-as-said
+# 7: + punctuation findings; numbers match by digits (0.83 / 'React Native 83')
+TIEBREAK_VERSION = 7
+
+
+def _tiebreak_existing_review(en, out):
+    """Run the caption tiebreak once on an EN review that predates it (or ran without captions):
+    the held lines it resolves leave the held list, the working copy is updated (backup kept)."""
+    import time
+
+    from . import en_gate, llm
+    from .caption_tiebreak import section
+
+    o = Path(out)
+    mark = o / "caption_tiebreak.json"
+    status, held = en_gate.review_state(o)
+    done = json.loads(mark.read_text(encoding="utf-8")) if mark.exists() else None
+    if isinstance(done, dict) and done.get("version", 1) >= TIEBREAK_VERSION:
+        return en
+    if status != "ok" or not held:
+        return en
+    if en_gate.signed_off(en, o):
+        return en  # the operator decided these lines: never second-guess a signed-off EN
+    log: list = []
+    en, tie, held = _caption_tiebreak(en, held, o, llm.invoke(), log)
+    if tie is None:  # couldn't run: try again next time
+        return en
+    held = _settle_meaning_disputes(o, held)
+    rec = json.loads((o / "en_review.json").read_text(encoding="utf-8"))
+    # the held list always gets the caption readings, resolved or not
+    en_gate.save_review_state(o, "ok", held, int(rec.get("applied", 0)) + len(tie))
+    if tie:
+        bk = o / f"en.pre_tiebreak_{time.strftime('%Y%m%d_%H%M%S')}.vtt"
+        bk.write_bytes((o / "en.vtt").read_bytes())
+        _write_any(en, str(o / "en.vtt"))
+        with open(o / "en_review.md", "a", encoding="utf-8") as fh:
+            fh.write(section(tie))
+    mark.write_text(
+        json.dumps(
+            {"version": TIEBREAK_VERSION, "resolved": tie, "attempts": log},
+            ensure_ascii=False,
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
+    return en
+
+
+def _settle_meaning_disputes(o: Path, held: list[dict]) -> list[dict]:
+    """Re-judge the stored meaning questions (en_gloss.recheck_disputes); those that weren't real
+    conflicts leave the held list."""
+    import types
+
+    from .en_gloss import recheck_disputes
+
+    second = _qe_second_judge(types.SimpleNamespace(qe_judge=True, single_judge=False))
+    if second is None or not (o / "meaning_notes.json").exists():
+        return held
+    from . import llm
+    from .resegment import merge_en_to_sentences
+
+    sents = merge_en_to_sentences(_read_any(str(o / "en.vtt"), "en"))
+    settled = set(recheck_disputes(o / "meaning_notes.json", second, sents, llm.invoke()))
+    if settled:
+        print(
+            f"EN meaning questions: {len(settled)} were not real conflicts (plainer reading kept)"
+        )
+
+    def gone(h):
+        m = re.search(r'--sentence "(.+?)" --meaning', h.get("detail", ""))
+        return h.get("kind") == "en-meaning" and m is not None and m.group(1) in settled
+
+    return [h for h in held if not gone(h)]
 
 
 def _looks_like_raw_caption(en) -> bool:
@@ -433,34 +651,21 @@ def _speech_align(en, out: Path):
     from . import en_gate
     from .formats.vtt import write_vtt
     from .validate import validate_subtitle
-    from .validate.speech_sync import (
-        load_speech_words,
-        retime_to_speech,
-        speech_sync_report,
-        speech_words_for,
-    )
+    from .validate.speech_sync import retime_to_speech, speech_sync_report, speech_words_for_run
 
     speech: list = []
-    raw = out / "raw.json"
-    autos = sorted((out / "_ingest").glob("*.en*.vtt")) if (out / "_ingest").is_dir() else []
     try:
-        if raw.exists():
-            speech = load_speech_words(raw)
-        for a in autos:
-            if not speech:
-                w = load_speech_words(a)
-                speech = w if len(w) > 50 else []  # a human caption has no word timings
-        if not speech and (out / "SOURCE-URL.txt").exists():
-            import re as _re
+        import re as _re
 
-            m = _re.search(
-                r"v=([A-Za-z0-9_-]{11})|youtu\.be/([A-Za-z0-9_-]{11})",
-                (out / "SOURCE-URL.txt").read_text(encoding="utf-8"),
-            )
-            if m:
-                speech = speech_words_for(m.group(1) or m.group(2), out / "_speech")
+        url = (
+            (out / "SOURCE-URL.txt").read_text(encoding="utf-8")
+            if (out / "SOURCE-URL.txt").exists()
+            else ""
+        )
+        m = _re.search(r"v=([A-Za-z0-9_-]{11})|youtu\.be/([A-Za-z0-9_-]{11})", url)
+        speech = speech_words_for_run(out, (m.group(1) or m.group(2)) if m else "")
     except Exception as e:
-        print(f"EN speech-sync check skipped ({type(e).__name__})")
+        print(f"{_degraded.note('EN speech-sync check', e)}")
         speech = []
     if not speech:
         print("EN speech-sync check: no word-timed speech for this video — not checked")
@@ -498,7 +703,7 @@ def _target_speech_check(en, out: Path, outputs) -> None:
     """Each translation vs the SPEECH by content (validate/content_sync.py), when this video has
     word-timed speech (out/raw.json or a cached auto-caption in out/_speech). Recorded in
     target_sync.json and printed; scripts/check_upload.py fails on it before handover."""
-    from .translate import CliTranslator
+    from . import llm
     from .validate.content_sync import content_speech_desync
     from .validate.speech_sync import load_speech_words
 
@@ -515,12 +720,12 @@ def _target_speech_check(en, out: Path, outputs) -> None:
                 o.subtitle,
                 en,
                 speech,
-                CliTranslator()._invoke,
+                llm.invoke(),
                 lang_name={"zh-Hans": "Chinese", "ja": "Japanese"}.get(o.language, o.language),
                 cache_path=out / f"target_sync_map.{o.language}.json",
             )
         except Exception as e:
-            print(f"{o.language}: speech-sync check skipped ({type(e).__name__})")
+            print(f"{_degraded.note(f'{o.language}: speech-sync check', e)}")
             continue
         errs = [x for x in r["off"] if x["severity"] == "error"]
         if errs:  # fix it: lay the out-of-step runs into their spoken windows (text unchanged)
@@ -530,7 +735,7 @@ def _target_speech_check(en, out: Path, outputs) -> None:
                 o.subtitle,
                 en,
                 speech,
-                CliTranslator()._invoke,
+                llm.invoke(),
                 lang_name={"zh-Hans": "Chinese", "ja": "Japanese"}.get(o.language, o.language),
                 cache_path=out / f"target_sync_map.{o.language}.json",
             )
@@ -540,7 +745,7 @@ def _target_speech_check(en, out: Path, outputs) -> None:
                     new,
                     en,
                     speech,
-                    CliTranslator()._invoke,
+                    llm.invoke(),
                     lang_name={"zh-Hans": "Chinese", "ja": "Japanese"}.get(o.language, o.language),
                     cache_path=out / f"target_sync_map.{o.language}.json",
                 )
@@ -568,6 +773,7 @@ def _translate_and_bundle(
     langs = args.lang or ["zh-Hans", "ja"]
     bank_for = _exemplar_bank_for(args, langs)
     en = _en_review(en, out, title, getattr(args, "en_style", None))
+    _write_caption_disagreements(out)
     en = _speech_align(en, out)
     if not en_gate.require(en, out, en_path):
         return 3
@@ -597,8 +803,54 @@ def _translate_and_bundle(
     _persist_term_pins(outputs, out)
     _target_speech_check(en, out, outputs)
     written = build_review_bundle(out, en, outputs)
-    print(f"Wrote {len(written)} files to {out}/ (REVIEW.md + per-language VTT+SRT)")
+    flag = _report_degraded(out, cache_path)
+    print(f"Wrote {len(written)} files to {out}/ (REVIEW.md + per-language VTT+SRT){flag}")
     return 0
+
+
+def _delivered_en_drift(out, en, library=None) -> str:
+    """'' unless the DELIVERED EN (output/FINAL_SUBTITLES/<video>.en.srt) is newer than this working
+    copy and its text differs: a fix made on the deliverable (a name corrected at handover, Cengage
+    2026-11-06) that a re-run would undo by translating the stale working copy."""
+    from .deliver import cue_text
+
+    out = Path(out)
+    lib = Path(library) if library else out.parent.parent / "FINAL_SUBTITLES" / f"{out.name}.en.srt"
+    wc = out / "en.vtt"
+    if not lib.exists() or not wc.exists() or lib.stat().st_mtime <= wc.stat().st_mtime:
+        return ""
+    shipped = _read_any(str(lib), "en")
+    if cue_text(shipped) == cue_text(en):
+        return ""
+    import difflib
+
+    a = [" ".join(c.lines) for c in en.cues]
+    b = [" ".join(c.lines) for c in shipped.cues]
+    diff = [
+        ln for ln in difflib.unified_diff(a, b, "working en.vtt", "delivered", n=0, lineterm="")
+    ]
+    return (
+        f"STOP: the delivered EN {lib} was changed after this working copy and differs from it —\n"
+        "a re-run would translate the old text and undo the delivered fix. Carry it over with "
+        f"`dev_titles sync-delivered {out}` (then approve-en), or touch {wc} to keep the working "
+        "copy.\n" + "\n".join(diff[:20])
+    )
+
+
+def _report_degraded(out, cache_path) -> str:
+    """A run that skipped steps after errors says so where it is read: first line of REVIEW.md,
+    status.json "degraded", and the closing "Wrote …" line the queue scripts summarise."""
+    from .localize import _write_status
+
+    banner = _degraded.banner()
+    _write_status(cache_path, degraded=_degraded.steps())  # [] clears a previous run's list
+    if not banner:
+        return ""
+    rp = Path(out) / "REVIEW.md"
+    if rp.exists():
+        rp.write_text(f"> **{banner}**\n\n" + rp.read_text(encoding="utf-8"), encoding="utf-8")
+    print(banner, flush=True)
+    return f" — {banner}"
 
 
 def cmd_localize(args) -> int:
@@ -623,7 +875,7 @@ def cmd_localize(args) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     # RAW-CAPTION GUARD: `localize` used to take an EN subtitle as-is. Fed a raw YouTube caption,
-    # that shipped 'um/uh', stutters and 100+ char lines as the EN deliverable (WindowsDevToTVs:
+    # that shipped 'um/uh', stutters and 100+ char lines as the EN deliverable (one such run:
     # 126/132 cues invalid, 28 fillers). `run` already proofreads captions; give `localize` the
     # same clean-read whenever the EN looks raw.
     if _looks_like_raw_caption(en):
@@ -733,7 +985,7 @@ def _exemplar_bank_for(args, langs):
         exclude = video_id_from_input(args.input)
         banks = build_exemplar_banks(langs, root=args.exemplars, exclude_video=exclude)
     except Exception as e:
-        print(f"Exemplar mining skipped ({type(e).__name__}); prose-style only")
+        print(f"{_degraded.note('Exemplar mining', e)}; prose-style only")
         return None
     if not banks:
         print(f"No exemplar corpus at {args.exemplars} — prose-style only")
@@ -1013,10 +1265,13 @@ def _transcribe_media(args, ri, out: Path, video_vocab):
     # WITHOUT re-running WhisperX; else transcribe and persist it.
     raw_p = out / "raw.json"
     recovery_second = None
+    second_p = out / "raw_second.json"
     if raw_p.exists() and not args.retranscribe:
         transcript = _load_raw(raw_p)
         print(f"Reusing saved raw transcript ({len(transcript.words)} words) — skip ASR")
-        return transcript, None
+        # the second ASR is saved too: without it a re-run silently skipped the auto-caption
+        # consult (the three-way mishear fix), which needs it
+        return transcript, (_load_raw(second_p) if second_p.exists() else None)
     engine = _resolve_engine(args.engine)
     if engine == "parakeet":
         # Parakeet (parakeet-mlx): ~20-30x faster than WhisperX-CPU and gets the
@@ -1048,6 +1303,7 @@ def _transcribe_media(args, ri, out: Path, video_vocab):
                     else "  no dropped spans found"
                 )
             except Exception as e:
+                note = _degraded.note("  recovery", e)
                 if "pip install" in str(e):  # WhisperX not installed: say so loudly
                     print(
                         "  WARNING: drop recovery is OFF — WhisperX is not installed, so speech "
@@ -1055,9 +1311,7 @@ def _transcribe_media(args, ri, out: Path, video_vocab):
                         "pip install 'dev-titles[whisper]' (or pass --no-recover to silence this)."
                     )
                 else:
-                    print(
-                        f"  recovery skipped ({type(e).__name__}: {str(e)[:120]}); Parakeet output kept"
-                    )
+                    print(f"{note}: {str(e)[:120]}; Parakeet output kept")
     elif engine == "assemblyai":
         # AssemblyAI cloud (Universal + diarization) — for public interview content.
         # A/B showed it isn't more COMPLETE than Parakeet, but transcribes conversational
@@ -1083,6 +1337,8 @@ def _transcribe_media(args, ri, out: Path, video_vocab):
         print(f"Transcribing with WhisperX {args.model_size} ({args.device}){msg}…")
         transcript = tr.transcribe(ri.path, language="en", custom_vocabulary=bias or None)
     _save_raw(transcript, raw_p)
+    if recovery_second is not None:
+        _save_raw(recovery_second, second_p)
     return transcript, recovery_second
 
 
@@ -1207,8 +1463,17 @@ def _prep_vocab(args, ri, transcript, video_vocab):
 
 def _en_from_transcript(args, ri, transcript, glossary, video_vocab, out: Path, recovery_second):
     """Raw ASR transcript -> the corrected EN master (`out/en.vtt`)."""
-    from . import llm
+    from . import en_gate
     from .vocab_prep import save_video_vocab
+
+    # record whether the auto-caption cross-check can run: the gate won't sign off a YouTube EN
+    # without it (a run once signed itself off with no caption check at all)
+    en_gate.save_crosscheck(
+        out,
+        youtube="youtube.com" in (ri.source or "") or "youtu.be" in (ri.source or ""),
+        auto_captions=bool(ri.auto_captions),
+        second_asr=recovery_second is not None,
+    )
 
     # Persist per-video vocab so a later --translate-only run (the two-phase backlog flow)
     # reuses the pinned renderings/identifiers/names — else they're built at transcribe and
@@ -1229,7 +1494,7 @@ def _en_from_transcript(args, ri, transcript, glossary, video_vocab, out: Path, 
             if _nh:
                 print(f"  collapsed {_nh} repeated-token run(s) from auto-caption (pre-clean-read)")
         except Exception as e:
-            print(f"  repeated-run recovery skipped ({type(e).__name__})")
+            print(f"{_degraded.note('  repeated-run recovery', e)}")
     if not args.no_correct:
         transcript = _correct_transcript(
             transcript, glossary, video_vocab, names=video_vocab.get("names")
@@ -1255,24 +1520,89 @@ def _en_from_transcript(args, ri, transcript, glossary, video_vocab, out: Path, 
     # correct garbled/OOV spans the primary got wrong — only where BOTH agree (safe).
     # Needs the recovery WhisperX pass (default parakeet path) as the 2nd source.
     if not args.no_qe and ri.auto_captions and recovery_second is not None:
-        from .transcribe_qe import autosub_consult, load_autosub, plausibility_suspects
-
-        try:
-            autosub = load_autosub(ri.auto_captions)
-            en_text = " ".join(" ".join(c.lines) for c in en.cues)
-            flags = [p["phrase"] for p in plausibility_suspects(llm.invoke(), en_text)]
-            fixes = autosub_consult(
-                en, recovery_second, autosub, flags, logger=lambda m: print(m, flush=True)
-            )
-            if fixes:
-                print(
-                    f"Auto-caption consult: auto-corrected {len(fixes)} span(s) "
-                    "(auto-caption + 2nd-ASR agree)"
-                )
-        except Exception as e:
-            print(f"  auto-caption consult skipped ({type(e).__name__})")
+        _write_caption_disagreements(out, _caption_consult(en, ri.auto_captions, recovery_second))
     _write_any(en, str(out / "en.vtt"))
     print(f"EN master: {len(en.cues)} cues -> {out}/en.vtt")
+    return en
+
+
+def _caption_consult(en, auto_captions: str, second) -> list[dict] | None:
+    """Where the auto-captions and the 2nd ASR agree against the primary transcript: returned as
+    SUGGESTIONS, never applied (`en` is not changed). None when it couldn't run.
+
+    Auto-apply was net harmful once Parakeet became the primary ASR: of 28 edits on 2026-11-05, 2-3
+    were plausible; the rest were the two weaker sources agreeing on the same mishear ('Zatoo' ->
+    'The two', 'Wispr Flow' -> 'Whisper Flow'), fillers and stutters put back, and neighbouring-cue
+    spill. They're listed in en_review.md for the reviewer instead."""
+    import copy
+
+    from . import llm
+    from .transcribe_qe import autosub_consult, load_autosub, plausibility_suspects
+
+    try:
+        autosub = load_autosub(auto_captions)
+        en_text = " ".join(" ".join(c.lines) for c in en.cues)
+        flags = [p["phrase"] for p in plausibility_suspects(llm.invoke(), en_text)]
+        fixes = autosub_consult(copy.deepcopy(en), second, autosub, flags)
+    except Exception as e:
+        print(f"{_degraded.note('  auto-caption consult', e)}")
+        return None
+    print(f"Auto-caption consult: {len(fixes)} disagreement(s) listed for review (not applied)")
+    return fixes
+
+
+def _write_caption_disagreements(out: Path, fixes: list[dict] | None = None) -> None:
+    """Keep the consult's suggestions in out/caption_disagreements.json and list them once in
+    en_review.md — now if the review exists, else after it is written (_translate_and_bundle)."""
+    jp = out / "caption_disagreements.json"
+    if fixes is not None:
+        jp.write_text(json.dumps(fixes, ensure_ascii=False, indent=1), encoding="utf-8")
+    md = out / "en_review.md"
+    if not jp.exists() or not md.exists():
+        return
+    fixes = json.loads(jp.read_text(encoding="utf-8"))
+    head = "## Auto-caption disagreements"
+    if not fixes or head in md.read_text(encoding="utf-8"):
+        return
+    rows = "\n".join(f"| {f['ts']} | {f['was']} | {f['now']} |" for f in fixes)
+    with open(md, "a", encoding="utf-8") as fh:
+        fh.write(
+            f"\n{head} ({len(fixes)}; information only, NOT applied)\n\n"
+            "Where YouTube's auto-captions and the 2nd ASR both differ from the transcript. Often "
+            "they share a mishear (names); occasionally the transcript is the one that's wrong.\n\n"
+            f"| Time | Transcript | Auto-captions + 2nd ASR |\n|---|---|---|\n{rows}\n"
+        )
+
+
+def _recheck_working_copy(args, ri, en, out: Path):
+    """An EN working copy built WITHOUT the auto-caption cross-check (captions unavailable then):
+    run only the consult on it now that the captions are here — the operator's edits and the held
+    review stay as they are; a full --rebuild-en would redo the LLM cleanup and the review. Fetches
+    only the 2nd ASR when it wasn't saved. Fixes are listed in en_review.md (2026-11-05)."""
+    from . import en_gate
+
+    if getattr(args, "no_qe", False) or not en_gate.crosscheck_missing(out) or not ri.auto_captions:
+        return en
+    second_p = out / "raw_second.json"
+    if second_p.exists():
+        second = _load_raw(second_p)
+    else:
+        from .transcribe import WhisperTranscriber
+
+        print(f"2nd ASR for the auto-caption cross-check: WhisperX {args.recover_model}…")
+        try:
+            second = WhisperTranscriber(
+                model_size=args.recover_model, device=args.device
+            ).transcribe(ri.path, language="en")
+        except Exception as e:
+            print(f"  2nd ASR failed ({type(e).__name__}); the EN stays held for a listen-check")
+            return en
+        _save_raw(second, second_p)
+    fixes = _caption_consult(en, ri.auto_captions, second)
+    if fixes is None:
+        return en
+    _write_caption_disagreements(out, fixes)
+    en_gate.save_crosscheck(out, youtube=True, auto_captions=True, second_asr=True)
     return en
 
 
@@ -1313,6 +1643,23 @@ def cmd_run(args) -> int:
     video_vocab = _run_vocab(args, out)
     print(f"Resolved {args.input} -> {ri.kind} ({ri.title or ri.path})")
 
+    if getattr(args, "rebuild_en", False) and (out / "en_review.md").exists():
+        # a rebuilt EN needs its own review: the old held list / sign-off describe the old EN, and
+        # _en_review skips itself while en_review.md exists (so a rebuild kept the stale review)
+        import time as _time
+
+        stamp = _time.strftime("%Y%m%d_%H%M%S")
+        for name in (
+            "en_review.md",
+            "en_review.json",
+            "en_approved.json",
+            "en.orig.vtt",
+            "caption_tiebreak.json",
+            "caption_disagreements.json",
+        ):
+            if (out / name).exists():
+                (out / name).rename(out / f"{name}.pre_rebuild_{stamp}")
+        print(f"--rebuild-en: the previous EN review set aside (*.pre_rebuild_{stamp})")
     # 1) EN master: from a subtitle input directly, else transcribe (+ clean-read correct) the media.
     # Once the EN stage has run (en_review.md + en.vtt exist), out/en.vtt is the OPERATOR'S working copy:
     # held lines get resolved in it and it is what approve-en signs. Re-running `run` on the media used
@@ -1329,7 +1676,14 @@ def cmd_run(args) -> int:
             "--rebuild-en re-transcribes and discards it."
         )
         en = _read_any(str(out / "en.vtt"), "en")
+        drift = _delivered_en_drift(out, en)
+        if drift:
+            print(drift)
+            return 3
+        en = _recheck_working_copy(args, ri, en, out)
+        en = _tiebreak_existing_review(en, out)
         if args.transcribe_only:
+            _report_degraded(out, str(out / "cache.jsonl"))
             return 0
         return _translate_and_bundle(
             args,
@@ -1356,6 +1710,7 @@ def cmd_run(args) -> int:
             # the pre-correction transcript (has confidences) is what QE scores
             _write_suspect_list(args, ri, transcript, en, out)
     if args.transcribe_only:
+        _report_degraded(out, str(out / "cache.jsonl"))
         return 0
 
     # 2) Translate the EN master.
@@ -1379,6 +1734,35 @@ def cmd_set_meaning(args) -> int:
         f"meaning recorded for: {args.sentence}\n  -> {args.meaning}\nBoth languages will use it."
     )
     return 0
+
+
+def cmd_sync_delivered(args) -> int:
+    """sync_delivered.sync for one run folder; prints what moved and what couldn't."""
+    import getpass
+
+    from .formats.vtt import write_vtt
+    from .sync_delivered import sync
+
+    out = Path(args.out)
+    lib = Path(args.library) if args.library else out.parent.parent / "FINAL_SUBTITLES"
+    rep = sync(out, lib, _read_any, write_vtt, user=getpass.getuser(), allow_many=args.all)
+    if rep.get("en"):
+        print(f"EN: {out}/en.vtt <- the delivered EN (backup kept) — sign it off again: approve-en")
+    failed = 0
+    for lang in ("ja", "zh-Hans"):
+        r = rep.get(lang)
+        if r:
+            print(f"{lang}: {r['locked']} line(s) updated and locked")
+            for f in r["failed"]:
+                print(f"  NOT carried: {f}")
+            failed += len(r["failed"])
+    if (
+        not failed
+        and not rep.get("en")
+        and not any(rep.get(x, {}).get("locked") for x in ("ja", "zh-Hans"))
+    ):
+        print("nothing to carry: the run folder already matches the delivered files")
+    return 1 if failed else 0
 
 
 def cmd_fix_line(args) -> int:
@@ -1443,8 +1827,11 @@ def cmd_approve_en(args) -> int:
     for h in held:
         print(f"  held {h.get('ts', '?'):>6}  {h.get('kind', '')}: {h.get('detail', '')}")
     from .en_gloss import disputed
+    from .resegment import merge_en_to_sentences
 
-    open_q = disputed(Path(args.out) / "meaning_notes.json")
+    open_q = disputed(
+        Path(args.out) / "meaning_notes.json", [s.text for s in merge_en_to_sentences(en)]
+    )
     if open_q:
         # a meaning question is not resolved by signing off: both languages need the answer
         print(f"Cannot sign off: {len(open_q)} meaning question(s) unanswered. For each, run:")
@@ -1789,6 +2176,14 @@ def _add_review_parsers(sub) -> None:
     fx.add_argument("--en-contains", default="", help="only lines whose English contains this")
     fx.add_argument("--note", default="", help="why, for the record")
     fx.set_defaults(func=cmd_fix_line)
+    sd = sub.add_parser(
+        "sync-delivered",
+        help="carry fixes made on the delivered files (FINAL_SUBTITLES) back into the run folder",
+    )
+    sd.add_argument("out", help="the video's output dir")
+    sd.add_argument("--library", default="", help="default: <out>/../../FINAL_SUBTITLES")
+    sd.add_argument("--all", action="store_true", help="also sync a track with many changes")
+    sd.set_defaults(func=cmd_sync_delivered)
 
 
 def _add_glossary_parsers(sub) -> None:
@@ -1861,16 +2256,51 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(raw)
+    _degraded.reset()
+    if getattr(args, "func", None) in _LONG_COMMANDS and argv is None:
+        from .frozen import reexec
+
+        reexec(raw)  # an hours-long run never imports code edited after it started
     from . import llm
 
-    llm.configure(args.llm, args.llm_model)
+    llm.configure(getattr(args, "llm", None), getattr(args, "llm_model", None))
     if getattr(
         args, "glossary", None
     ):  # partners.yaml / editor examples live beside the glossary in use
         os.environ["SUBTITLE_GLOSSARY_DIR"] = str(Path(args.glossary).parent)
+    if getattr(args, "func", None) in _LONG_COMMANDS:
+        _stay_awake()
     return args.func(args)
 
+
+_LONG_COMMANDS: tuple = ()  # filled below, once the command functions exist
+
+
+def _stay_awake() -> None:
+    """Keep the Mac from idle-sleeping while this (hours-long) run is alive: caffeinate -w releases
+    by itself when this process exits. Overnight 2026-11-05 the Mac slept at 22:29 and cycled
+    sleep/wake 78 times; a ~2 h translation took 9+ h. (A closed lid on battery still sleeps.)"""
+    import shutil
+
+    # fixed argv, no shell
+    import subprocess  # nosec B404
+
+    if sys.platform != "darwin" or not shutil.which("caffeinate"):
+        return
+    try:
+        # fixed argv, our own pid, no shell
+        subprocess.Popen(  # nosec B603 B607
+            ["caffeinate", "-i", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
+_LONG_COMMANDS = (cmd_run, cmd_localize)
 
 if __name__ == "__main__":
     sys.exit(main())

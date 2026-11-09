@@ -208,6 +208,25 @@ def speech_words_for(video_id: str, cache_dir: str | Path) -> list[tuple[str, fl
     return load_speech_words(p) if p.exists() else []
 
 
+def speech_words_for_run(out, video_id: str = "", cache_dir=None) -> list[tuple[str, float]]:
+    """Word-timed speech for a video's run folder, best source first: our ASR words (raw.json), the
+    word-timed auto-captions fetched at ingest (_ingest/*.en*.vtt), then a yt-dlp download. The upload
+    check went straight to yt-dlp, which needs a PO token now (HTTP 429): on 2026-11-06 it checked no
+    EN track and its noisy name-anchor fallback failed an in-sync zh track."""
+    out = Path(out)
+    local = [out / "raw.json"] + (
+        sorted((out / "_ingest").glob("*.en*.vtt")) if (out / "_ingest").is_dir() else []
+    )
+    for k, p in enumerate(local):
+        try:
+            w = load_speech_words(p) if p.exists() else []
+        except Exception:  # a corrupt or half-written file: try the next source
+            w = []
+        if len(w) > (0 if k == 0 else 50):  # a human caption has no word timings
+            return w
+    return speech_words_for(video_id, cache_dir or out / "_speech") if video_id else []
+
+
 def _cue_word_times(en, speech) -> dict[int, tuple[float, float]]:
     """cue index -> (speech time of its first word, of its last word), for cues whose first AND
     last words are aligned (blocks of >= 2 matching words)."""
